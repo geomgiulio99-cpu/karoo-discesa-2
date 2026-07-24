@@ -1,5 +1,9 @@
 <resources>
-    <string name="app_name">template</string>
+    <string name="app_name">Discese KOM</string>
     <string name="hello_karoo">Hello Karoo!</string>
-    <string name="extension_name">template</string>
+    <string name="extension_name">Discese KOM</string>
+    <string name="dt_descent_name">Discesa vicina</string>
+    <string name="dt_descent_desc">Distanza dalla partenza del segmento in discesa più vicino</string>
+    <string name="dt_delta_name">Distacco KOM</string>
+    <string name="dt_delta_desc">Secondi di vantaggio o ritardo sul KOM nel segmento in discesa</string>
 </resources>
