@@ -3,6 +3,18 @@
     displayName="@string/extension_name"
     icon="@drawable/ic_launcher_foreground"
     id="template-id"
-    scansDevices="false">
-    <!-- DataType ... -->
+    scansDevices="false"
+    mapLayer="true">
+    <DataType
+        typeId="descent-distance"
+        displayName="@string/dt_descent_name"
+        description="@string/dt_descent_desc"
+        graphical="false"
+        icon="@drawable/ic_launcher_foreground" />
+    <DataType
+        typeId="descent-delta"
+        displayName="@string/dt_delta_name"
+        description="@string/dt_delta_desc"
+        graphical="false"
+        icon="@drawable/ic_launcher_foreground" />
 </ExtensionInfo>
