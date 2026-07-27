@@ -15,6 +15,6 @@
         typeId="descent-delta"
         displayName="@string/dt_delta_name"
         description="@string/dt_delta_desc"
-        graphical="false"
+        graphical="true"
         icon="@drawable/ic_launcher_foreground" />
 </ExtensionInfo>
