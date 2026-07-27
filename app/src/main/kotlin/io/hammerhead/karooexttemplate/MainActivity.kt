@@ -30,7 +30,8 @@ class MainActivity : ComponentActivity() {
         val endLng: Double,
         val poly: String,
         val kom: String,
-        val lengthM: Int
+        val lengthM: Int,
+        val curve: String
     )
 
     private lateinit var output: TextView
@@ -66,7 +67,9 @@ class MainActivity : ComponentActivity() {
             try {
                 loadDescents()
                 saveDescents()
-                setStatus("Pronto: ${descents.size} segmenti in discesa salvati.")
+                var withCurve = 0
+                for (d in descents) if (d.curve.isNotEmpty()) withCurve++
+                setStatus("Pronto: ${descents.size} discese salvate\n($withCurve con profilo altimetrico)")
             } catch (e: Exception) {
                 setStatus("ERRORE Strava:\n${e.message}")
             }
@@ -127,7 +130,8 @@ class MainActivity : ComponentActivity() {
                 if (n != null) {
                     sb.append("Discesa più vicina:\n• ${n.name}\n")
                     sb.append("   partenza a ${best.toInt()} m\n")
-                    sb.append("   KOM ${n.kom} · lunghezza ${n.lengthM} m")
+                    sb.append("   KOM ${n.kom} · lunghezza ${n.lengthM} m\n")
+                    sb.append("   profilo: ${if (n.curve.isEmpty()) "no (ritmo medio)" else "sì"}")
                 }
             }
         }
@@ -162,7 +166,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        setStatus("Preferiti: ${starred.size} · in discesa: ${onlyDescents.size}\nRecupero i KOM...")
+        setStatus("Preferiti: ${starred.size} · in discesa: ${onlyDescents.size}\nRecupero KOM e profili...")
 
         var done = 0
         var errors = 0
@@ -172,28 +176,46 @@ class MainActivity : ComponentActivity() {
             val key = id.toString()
             var kom = "n/d"
             var poly = ""
+            var curve = ""
 
             if (cache.has(key)) {
                 val c = cache.getJSONObject(key)
                 kom = c.optString("kom", "n/d")
                 poly = c.optString("poly", "")
+                curve = c.optString("curve", "")
             } else {
                 try {
                     val detail = JSONObject(apiGet("/segments/$id", token))
                     kom = detail.optJSONObject("xoms")?.optString("kom")?.ifBlank { null } ?: "n/d"
                     poly = detail.optJSONObject("map")?.optString("polyline") ?: ""
+                    Thread.sleep(300)
+
+                    // profilo altimetrico (opzionale: se non arriva si usa il ritmo medio)
+                    try {
+                        val st = JSONObject(
+                            apiGet("/segments/$id/streams?keys=distance,altitude&key_by_type=true", token)
+                        )
+                        curve = buildCurve(
+                            st.optJSONObject("distance")?.optJSONArray("data"),
+                            st.optJSONObject("altitude")?.optJSONArray("data")
+                        )
+                        Thread.sleep(300)
+                    } catch (e: Exception) {
+                        curve = ""
+                    }
+
                     val c = JSONObject()
                     c.put("kom", kom)
                     c.put("poly", poly)
+                    c.put("curve", curve)
                     cache.put(key, c)
-                    Thread.sleep(300)
                 } catch (e: Exception) {
                     errors++
                     if (errors >= 3) {
                         prefs.edit().putString("segcache", cache.toString()).apply()
                         setStatus(
                             "Limite API Strava raggiunto.\n" +
-                            "Salvati ${descents.size} segmenti su ${onlyDescents.size}.\n" +
+                            "Salvate ${descents.size} discese su ${onlyDescents.size}.\n" +
                             "Riapri l'app tra ~15 minuti per completare."
                         )
                         return
@@ -212,14 +234,85 @@ class MainActivity : ComponentActivity() {
                 Descent(
                     seg.optString("name", "(senza nome)"),
                     sLat, sLng, eLat, eLng, poly, kom,
-                    seg.optDouble("distance", 0.0).toInt()
+                    seg.optDouble("distance", 0.0).toInt(),
+                    curve
                 )
             )
             done++
-            if (done % 3 == 0) setStatus("Recupero KOM: $done / ${onlyDescents.size}")
+            if (done % 3 == 0) setStatus("Elaborate $done / ${onlyDescents.size} discese")
         }
 
         prefs.edit().putString("segcache", cache.toString()).apply()
+    }
+
+    /**
+     * Dal profilo altimetrico ricava una curva di ritmo:
+     * 51 valori = frazione di tempo KOM trascorsa a ogni 2% di distanza.
+     */
+    private fun buildCurve(distances: JSONArray?, altitudes: JSONArray?): String {
+        if (distances == null || altitudes == null) return ""
+        val n = Math.min(distances.length(), altitudes.length())
+        if (n < 5) return ""
+
+        val d = DoubleArray(n)
+        val a = DoubleArray(n)
+        for (i in 0 until n) {
+            d[i] = distances.optDouble(i, 0.0)
+            a[i] = altitudes.optDouble(i, 0.0)
+        }
+
+        // lisciatura della quota: media mobile su 5 punti (toglie il rumore GPS)
+        val sm = DoubleArray(n)
+        for (i in 0 until n) {
+            var s = 0.0
+            var c = 0
+            var j = Math.max(0, i - 2)
+            val jmax = Math.min(n - 1, i + 2)
+            while (j <= jmax) { s += a[j]; c++; j++ }
+            sm[i] = s / c
+        }
+
+        val cumD = DoubleArray(n)
+        val cumT = DoubleArray(n)
+        for (i in 1 until n) {
+            val dd = d[i] - d[i - 1]
+            if (dd <= 0.0) {
+                cumD[i] = cumD[i - 1]
+                cumT[i] = cumT[i - 1]
+                continue
+            }
+            val g = (sm[i] - sm[i - 1]) / dd
+            // velocità stimata (km/h): in discesa ~ radice della pendenza, in salita penalizzata
+            var v = if (g < 0.0) {
+                Math.sqrt(900.0 + 20000.0 * (-g))
+            } else {
+                Math.sqrt(900.0 / (1.0 + 15.0 * g))
+            }
+            if (v < 8.0) v = 8.0
+            if (v > 75.0) v = 75.0
+            cumD[i] = cumD[i - 1] + dd
+            cumT[i] = cumT[i - 1] + dd / (v / 3.6)
+        }
+
+        val totD = cumD[n - 1]
+        val totT = cumT[n - 1]
+        if (totD <= 0.0 || totT <= 0.0) return ""
+
+        val steps = 50
+        val sb = StringBuilder()
+        var idx = 1
+        for (k in 0..steps) {
+            val target = totD * k / steps
+            while (idx < n - 1 && cumD[idx] < target) idx++
+            val d0 = cumD[idx - 1]
+            val d1 = cumD[idx]
+            val t0 = cumT[idx - 1]
+            val t1 = cumT[idx]
+            val t = if (d1 > d0) t0 + (t1 - t0) * (target - d0) / (d1 - d0) else t0
+            if (k > 0) sb.append(",")
+            sb.append(String.format(java.util.Locale.US, "%.4f", t / totT))
+        }
+        return sb.toString()
     }
 
     private fun saveDescents() {
@@ -228,7 +321,7 @@ class MainActivity : ComponentActivity() {
             val o = JSONObject()
             o.put("name", d.name); o.put("lat", d.lat); o.put("lng", d.lng)
             o.put("endLat", d.endLat); o.put("endLng", d.endLng); o.put("poly", d.poly)
-            o.put("kom", d.kom); o.put("len", d.lengthM)
+            o.put("kom", d.kom); o.put("len", d.lengthM); o.put("curve", d.curve)
             arr.put(o)
         }
         getSharedPreferences("karoo_discesa", MODE_PRIVATE)
