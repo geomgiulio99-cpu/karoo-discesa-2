@@ -1,10 +1,12 @@
 package io.hammerhead.karooexttemplate.extension
 
 import android.content.Context
+import android.widget.RemoteViews
 import io.hammerhead.karooext.KarooSystemService
 import io.hammerhead.karooext.extension.DataTypeImpl
 import io.hammerhead.karooext.extension.KarooExtension
 import io.hammerhead.karooext.internal.Emitter
+import io.hammerhead.karooext.internal.ViewEmitter
 import io.hammerhead.karooext.models.DataPoint
 import io.hammerhead.karooext.models.DataType
 import io.hammerhead.karooext.models.MapEffect
@@ -14,6 +16,9 @@ import io.hammerhead.karooext.models.ShowPolyline
 import io.hammerhead.karooext.models.ShowSymbols
 import io.hammerhead.karooext.models.StreamState
 import io.hammerhead.karooext.models.Symbol
+import io.hammerhead.karooext.models.UpdateGraphicConfig
+import io.hammerhead.karooext.models.ViewConfig
+import io.hammerhead.karooexttemplate.R
 import org.json.JSONArray
 
 data class Descent(
@@ -24,7 +29,8 @@ data class Descent(
     val endLng: Double,
     val poly: String,
     val komSec: Double,
-    val lengthM: Double
+    val lengthM: Double,
+    val curve: DoubleArray
 )
 
 fun parseKom(s: String): Double {
@@ -37,6 +43,22 @@ fun parseKom(s: String): Double {
             else -> 0.0
         }
     } catch (e: Exception) { 0.0 }
+}
+
+fun expectedFrac(curve: DoubleArray, distFrac: Double): Double {
+    if (curve.size < 2) return distFrac
+    var f = distFrac
+    if (f < 0.0) f = 0.0
+    if (f > 1.0) f = 1.0
+    val x = f * (curve.size - 1)
+    var i = Math.floor(x).toInt()
+    if (i > curve.size - 2) i = curve.size - 2
+    return curve[i] + (curve[i + 1] - curve[i]) * (x - i)
+}
+
+fun fmtDelta(sec: Double): String {
+    val r = Math.round(sec).toInt()
+    return if (r > 0) "+$r" else r.toString()
 }
 
 fun haversine(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
@@ -89,6 +111,20 @@ fun readDescents(context: Context): List<Descent> {
             val o = arr.getJSONObject(i)
             val la = o.getDouble("lat")
             val ln = o.getDouble("lng")
+
+            val cs = o.optString("curve", "")
+            val parts = if (cs.isEmpty()) emptyList() else cs.split(",")
+            val curve = if (parts.size < 2) DoubleArray(0) else {
+                val c = DoubleArray(parts.size)
+                var ok = true
+                for (k in parts.indices) {
+                    val v = parts[k].toDoubleOrNull()
+                    if (v == null) { ok = false; break }
+                    c[k] = v
+                }
+                if (ok) c else DoubleArray(0)
+            }
+
             out.add(
                 Descent(
                     o.optString("name", "?"),
@@ -97,7 +133,8 @@ fun readDescents(context: Context): List<Descent> {
                     o.optDouble("endLng", ln),
                     o.optString("poly", ""),
                     parseKom(o.optString("kom", "0")),
-                    o.optDouble("len", 0.0)
+                    o.optDouble("len", 0.0),
+                    curve
                 )
             )
         }
@@ -105,9 +142,194 @@ fun readDescents(context: Context): List<Descent> {
     return out
 }
 
+/**
+ * Tiene traccia del segmento in corso. Vive nell'estensione, NON nei campi dati:
+ * così se il Karoo riavvia un campo, il conteggio non si perde.
+ */
+class DescentTracker(private val ext: TemplateExtension) {
+
+    @Volatile var descents: List<Descent> = emptyList()
+
+    // stato letto dai campi dati
+    @Volatile var active = false
+    @Volatile var holding = false
+    @Volatile var delta = 0.0
+    @Volatile var deltaText = "--"
+    @Volatile var ahead = false
+    @Volatile var komAvgText = "--"
+    @Volatile var myAvgText = "--"
+    @Volatile var nearestDist = -1.0
+
+    private var cur: Descent? = null
+    private var pts: List<DoubleArray> = emptyList()
+    private var cum: DoubleArray = DoubleArray(0)
+    private var polyLen = 0.0
+    private var lastIdx = 0
+    private var startMs = 0L
+    private var offTrack = 0
+    private var holdUntil = 0L
+    private var traveled = 0.0
+    private var prevLat = 0.0
+    private var prevLng = 0.0
+    private var consumerId: String? = null
+
+    fun reload(context: Context) {
+        try { descents = readDescents(context) } catch (e: Exception) { }
+    }
+
+    fun start(context: Context) {
+        if (consumerId == null) {
+            consumerId = ext.karooSystem.addConsumer { loc: OnLocationChanged ->
+                try { onLoc(loc.lat, loc.lng) } catch (e: Exception) { }
+            }
+        }
+        // ricarica periodica: prende i segmenti nuovi sincronizzati dall'app
+        Thread {
+            while (true) {
+                try {
+                    if (!active) reload(context)
+                    Thread.sleep(60000)
+                } catch (e: Exception) { return@Thread }
+            }
+        }.start()
+    }
+
+    fun stop() {
+        consumerId?.let { try { ext.karooSystem.removeConsumer(it) } catch (e: Exception) { } }
+        consumerId = null
+    }
+
+    private fun onLoc(lat: Double, lng: Double) {
+        val list = descents
+        if (list.isEmpty()) return
+        val now = System.currentTimeMillis()
+
+        var best = -1.0
+        var near: Descent? = null
+        for (d in list) {
+            val dd = haversine(lat, lng, d.lat, d.lng)
+            if (best < 0 || dd < best) { best = dd; near = d }
+        }
+        nearestDist = best
+
+        val c = cur
+        if (c == null) {
+            if (now < holdUntil) {
+                holding = true
+                return
+            }
+            if (holding) {
+                holding = false
+                deltaText = "--"; komAvgText = "--"; myAvgText = "--"
+                ahead = false; delta = 0.0
+            }
+            val n = near
+            if (n != null && best <= 30.0 && n.komSec > 0 && n.lengthM > 0) begin(n, lat, lng)
+            return
+        }
+
+        val along: Double
+        val off: Double
+        if (pts.isEmpty()) {
+            traveled += haversine(prevLat, prevLng, lat, lng)
+            along = traveled
+            off = 0.0
+        } else {
+            var bestI = lastIdx
+            var bestD = Double.MAX_VALUE
+            val from = Math.max(0, lastIdx - 5)
+            val to = Math.min(pts.size - 1, lastIdx + 400)
+            for (i in from..to) {
+                val d = haversine(lat, lng, pts[i][0], pts[i][1])
+                if (d < bestD) { bestD = d; bestI = i }
+            }
+            lastIdx = bestI
+            along = cum[bestI]
+            off = bestD
+        }
+        prevLat = lat
+        prevLng = lng
+
+        if (off > 100.0) {
+            offTrack++
+            if (offTrack >= 8) { abort(); return }
+        } else {
+            offTrack = 0
+        }
+
+        val elapsed = (now - startMs) / 1000.0
+        var frac = if (polyLen > 0) along / polyLen else 0.0
+        if (frac < 0.0) frac = 0.0
+        if (frac > 1.0) frac = 1.0
+
+        delta = elapsed - c.komSec * expectedFrac(c.curve, frac)
+        deltaText = fmtDelta(delta)
+        ahead = delta < 0
+        komAvgText = "%.0f".format(c.lengthM / c.komSec * 3.6)
+        myAvgText = if (elapsed > 1.0) "%.0f".format(along / elapsed * 3.6) else "0"
+
+        val toEnd = haversine(lat, lng, c.endLat, c.endLng)
+        if (frac >= 0.97 || (frac > 0.85 && toEnd < 40.0)) finish(elapsed)
+    }
+
+    private fun begin(d: Descent, lat: Double, lng: Double) {
+        cur = d
+        pts = decodePolyline(d.poly)
+        cum = DoubleArray(if (pts.isEmpty()) 1 else pts.size)
+        polyLen = 0.0
+        for (i in 1 until pts.size) {
+            polyLen += haversine(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1])
+            cum[i] = polyLen
+        }
+        if (polyLen <= 0.0) polyLen = d.lengthM
+        lastIdx = 0
+        startMs = System.currentTimeMillis()
+        offTrack = 0
+        traveled = 0.0
+        prevLat = lat
+        prevLng = lng
+        active = true
+        holding = false
+        delta = 0.0
+        deltaText = "0"
+        ahead = false
+        komAvgText = "%.0f".format(d.lengthM / d.komSec * 3.6)
+        myAvgText = "0"
+        ext.beepStart()
+    }
+
+    private fun finish(elapsed: Double) {
+        val c = cur ?: return
+        val fin = elapsed - c.komSec
+        delta = fin
+        deltaText = fmtDelta(fin)
+        ahead = fin < 0
+        holdUntil = System.currentTimeMillis() + 15000L
+        holding = true
+        active = false
+        cur = null
+        pts = emptyList()
+        ext.beepEnd()
+    }
+
+    private fun abort() {
+        cur = null
+        pts = emptyList()
+        active = false
+        holding = false
+        offTrack = 0
+        delta = 0.0
+        deltaText = "--"
+        komAvgText = "--"
+        myAvgText = "--"
+        ahead = false
+    }
+}
+
 class TemplateExtension : KarooExtension("template-id", "1.0") {
 
     lateinit var karooSystem: KarooSystemService
+    val tracker: DescentTracker by lazy { DescentTracker(this) }
 
     override val types by lazy {
         listOf(
@@ -119,7 +341,8 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
     override fun onCreate() {
         super.onCreate()
         karooSystem = KarooSystemService(applicationContext)
-        karooSystem.connect { }
+        tracker.reload(applicationContext)
+        karooSystem.connect { tracker.start(applicationContext) }
     }
 
     fun beepStart() {
@@ -164,6 +387,7 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
     }
 
     override fun onDestroy() {
+        try { tracker.stop() } catch (e: Exception) { }
         try { karooSystem.disconnect() } catch (e: Exception) { }
         super.onDestroy()
     }
@@ -175,28 +399,28 @@ class DescentDistanceType(
 ) : DataTypeImpl(extension, "descent-distance") {
 
     override fun startStream(emitter: Emitter<StreamState>) {
-        val descents = readDescents(ext.applicationContext)
-        if (descents.isEmpty()) {
-            emitter.onNext(StreamState.NotAvailable)
-            return
-        }
-        emitter.onNext(StreamState.Searching)
-
-        val consumerId = ext.karooSystem.addConsumer { loc: OnLocationChanged ->
-            var best = -1.0
-            for (d in descents) {
-                val dist = haversine(loc.lat, loc.lng, d.lat, d.lng)
-                if (best < 0 || dist < best) best = dist
+        var run = true
+        Thread {
+            while (run) {
+                try {
+                    val t = ext.tracker
+                    if (t.descents.isEmpty()) {
+                        t.reload(ext.applicationContext)
+                        emitter.onNext(StreamState.NotAvailable)
+                    } else if (t.nearestDist >= 0) {
+                        emitter.onNext(
+                            StreamState.Streaming(
+                                DataPoint(dataTypeId, mapOf(DataType.Field.SINGLE to t.nearestDist))
+                            )
+                        )
+                    } else {
+                        emitter.onNext(StreamState.Searching)
+                    }
+                } catch (e: Exception) { }
+                try { Thread.sleep(1000) } catch (e: Exception) { }
             }
-            if (best >= 0) {
-                emitter.onNext(
-                    StreamState.Streaming(DataPoint(dataTypeId, mapOf(DataType.Field.SINGLE to best)))
-                )
-            }
-        }
-        emitter.setCancellable {
-            try { ext.karooSystem.removeConsumer(consumerId) } catch (e: Exception) { }
-        }
+        }.start()
+        emitter.setCancellable { run = false }
     }
 }
 
@@ -206,99 +430,52 @@ class DescentDeltaType(
 ) : DataTypeImpl(extension, "descent-delta") {
 
     override fun startStream(emitter: Emitter<StreamState>) {
-        val descents = readDescents(ext.applicationContext)
-        if (descents.isEmpty()) {
-            emitter.onNext(StreamState.NotAvailable)
-            return
-        }
-        emitter.onNext(StreamState.Searching)
-
-        var active: Descent? = null
-        var activePoints: List<DoubleArray> = emptyList()
-        var startMs = 0L
-        var traveled = 0.0
-        var lastLat = 0.0
-        var lastLng = 0.0
-        var holdUntilMs = 0L
-        var holdValue = 0.0
-
-        val consumerId = ext.karooSystem.addConsumer { loc: OnLocationChanged ->
-            val now = System.currentTimeMillis()
-            val a = active
-
-            if (a == null) {
-                if (now < holdUntilMs) {
-                    emitter.onNext(
-                        StreamState.Streaming(DataPoint(dataTypeId, mapOf(DataType.Field.SINGLE to holdValue)))
-                    )
-                } else {
-                    var near: Descent? = null
-                    var best = -1.0
-                    for (d in descents) {
-                        val dist = haversine(loc.lat, loc.lng, d.lat, d.lng)
-                        if (best < 0 || dist < best) { best = dist; near = d }
-                    }
-                    val n = near
-                    if (n != null && best in 0.0..30.0 && n.komSec > 0 && n.lengthM > 0) {
-                        active = n
-                        activePoints = decodePolyline(n.poly)
-                        startMs = now
-                        traveled = 0.0
-                        lastLat = loc.lat
-                        lastLng = loc.lng
-                        ext.beepStart()
+        var run = true
+        Thread {
+            while (run) {
+                try {
+                    val t = ext.tracker
+                    if (t.descents.isEmpty()) {
+                        t.reload(ext.applicationContext)
+                        emitter.onNext(StreamState.NotAvailable)
+                    } else if (t.active || t.holding) {
                         emitter.onNext(
-                            StreamState.Streaming(DataPoint(dataTypeId, mapOf(DataType.Field.SINGLE to 0.0)))
+                            StreamState.Streaming(
+                                DataPoint(dataTypeId, mapOf(DataType.Field.SINGLE to t.delta))
+                            )
                         )
                     } else {
                         emitter.onNext(StreamState.Searching)
                     }
-                }
-            } else {
-                traveled += haversine(lastLat, lastLng, loc.lat, loc.lng)
-                lastLat = loc.lat
-                lastLng = loc.lng
-
-                if (activePoints.isNotEmpty()) {
-                    var minDist = -1.0
-                    for (p in activePoints) {
-                        val dist = haversine(loc.lat, loc.lng, p[0], p[1])
-                        if (minDist < 0 || dist < minDist) minDist = dist
-                        if (minDist <= 100.0) break
-                    }
-                    if (minDist > 100.0) {
-                        active = null
-                        activePoints = emptyList()
-                        emitter.onNext(StreamState.Searching)
-                        return@addConsumer
-                    }
-                }
-
-                val elapsed = (now - startMs) / 1000.0
-                var frac = traveled / a.lengthM
-                if (frac < 0.0) frac = 0.0
-                if (frac > 1.0) frac = 1.0
-                val delta = elapsed - a.komSec * frac
-
-                val toEnd = haversine(loc.lat, loc.lng, a.endLat, a.endLng)
-                if (frac > 0.7 && toEnd < 30.0) {
-                    holdValue = elapsed - a.komSec
-                    holdUntilMs = now + 12000L
-                    active = null
-                    activePoints = emptyList()
-                    ext.beepEnd()
-                    emitter.onNext(
-                        StreamState.Streaming(DataPoint(dataTypeId, mapOf(DataType.Field.SINGLE to holdValue)))
-                    )
-                } else {
-                    emitter.onNext(
-                        StreamState.Streaming(DataPoint(dataTypeId, mapOf(DataType.Field.SINGLE to delta)))
-                    )
-                }
+                } catch (e: Exception) { }
+                try { Thread.sleep(1000) } catch (e: Exception) { }
             }
-        }
-        emitter.setCancellable {
-            try { ext.karooSystem.removeConsumer(consumerId) } catch (e: Exception) { }
-        }
+        }.start()
+        emitter.setCancellable { run = false }
+    }
+
+    override fun startView(context: Context, config: ViewConfig, emitter: ViewEmitter) {
+        emitter.onNext(UpdateGraphicConfig(showHeader = false))
+        var run = true
+        Thread {
+            while (run) {
+                try {
+                    val t = ext.tracker
+                    val rv = RemoteViews(context.packageName, R.layout.field_delta)
+                    rv.setTextViewText(R.id.field_kom_avg, "KOM ${t.komAvgText}")
+                    rv.setTextViewText(R.id.field_my_avg, "Io ${t.myAvgText}")
+                    rv.setTextViewText(R.id.field_delta_value, t.deltaText)
+                    val color = when {
+                        t.deltaText == "--" -> 0xFFFFFFFF.toInt()
+                        t.ahead -> 0xFF33CC33.toInt()
+                        else -> 0xFFFF4444.toInt()
+                    }
+                    rv.setTextColor(R.id.field_delta_value, color)
+                    emitter.updateView(rv)
+                } catch (e: Exception) { }
+                try { Thread.sleep(500) } catch (e: Exception) { }
+            }
+        }.start()
+        emitter.setCancellable { run = false }
     }
 }
