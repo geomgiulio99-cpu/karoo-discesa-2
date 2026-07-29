@@ -18,7 +18,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:textColor="#FFFFFF"
-            android:textSize="15sp"
+            android:textSize="26sp"
             android:maxLines="1"
             android:text="KOM --" />
 
@@ -27,20 +27,37 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:textColor="#4FC3F7"
-            android:textSize="15sp"
+            android:textSize="26sp"
             android:maxLines="1"
             android:text="Io --" />
     </LinearLayout>
 
-    <TextView
-        android:id="@+id/field_delta_value"
+    <LinearLayout
         android:layout_width="0dp"
         android:layout_height="match_parent"
         android:layout_weight="1.4"
-        android:gravity="center"
-        android:textColor="#FFFFFF"
-        android:textStyle="bold"
-        android:textSize="46sp"
-        android:maxLines="1"
-        android:text="--" />
+        android:orientation="vertical"
+        android:gravity="center">
+
+        <TextView
+            android:id="@+id/field_delta_value"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:textColor="#FFFFFF"
+            android:textStyle="bold"
+            android:textSize="46sp"
+            android:maxLines="1"
+            android:text="--" />
+
+        <TextView
+            android:id="@+id/field_remaining"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:textColor="#BBBBBB"
+            android:textSize="16sp"
+            android:maxLines="1"
+            android:text="-- km" />
+    </LinearLayout>
 </LinearLayout>
