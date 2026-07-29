@@ -391,14 +391,14 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
                 emitter.onNext(ShowPolyline("discesa-$i", d.poly, 0xFFFF6600.toInt(), 8))
             }
             val kmh = komAvgKmh(d)
-            val tag = if (kmh > 0) " · KOM ${"%.0f".format(kmh)} km/h" else ""
+           val tag = if (kmh > 0) "KOM ${"%.0f".format(kmh)} km/h · " else ""
             symbols.add(
                 Symbol.POI("disc-start-$i", d.lat, d.lng, Symbol.POI.Types.SUMMIT,
-                    "INIZIO ${d.name}$tag")
+                    "${tag}INIZIO ${d.name}")
             )
             symbols.add(
                 Symbol.POI("disc-end-$i", d.endLat, d.endLng, Symbol.POI.Types.CONTROL,
-                    "FINE ${d.name}$tag")
+                    "${tag}FINE ${d.name}")
             )
         }
         if (symbols.isNotEmpty()) emitter.onNext(ShowSymbols(symbols))
