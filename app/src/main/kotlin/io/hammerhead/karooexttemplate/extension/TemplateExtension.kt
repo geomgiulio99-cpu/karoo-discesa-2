@@ -1,5 +1,4 @@
 package io.hammerhead.karooexttemplate.extension
-
 import android.content.Context
 import android.widget.RemoteViews
 import io.hammerhead.karooext.KarooSystemService
@@ -45,6 +44,11 @@ fun parseKom(s: String): Double {
     } catch (e: Exception) { 0.0 }
 }
 
+fun komAvgKmh(d: Descent): Double {
+    if (d.komSec <= 0.0 || d.lengthM <= 0.0) return 0.0
+    return d.lengthM / d.komSec * 3.6
+}
+
 fun expectedFrac(curve: DoubleArray, distFrac: Double): Double {
     if (curve.size < 2) return distFrac
     var f = distFrac
@@ -59,6 +63,13 @@ fun expectedFrac(curve: DoubleArray, distFrac: Double): Double {
 fun fmtDelta(sec: Double): String {
     val r = Math.round(sec).toInt()
     return if (r > 0) "+$r" else r.toString()
+}
+
+fun fmtKm(meters: Double): String {
+    var m = meters
+    if (m < 0.0) m = 0.0
+    return if (m < 1000.0) String.format(java.util.Locale.US, "%.2f", m / 1000.0)
+    else String.format(java.util.Locale.US, "%.1f", m / 1000.0)
 }
 
 fun haversine(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
@@ -142,15 +153,10 @@ fun readDescents(context: Context): List<Descent> {
     return out
 }
 
-/**
- * Tiene traccia del segmento in corso. Vive nell'estensione, NON nei campi dati:
- * così se il Karoo riavvia un campo, il conteggio non si perde.
- */
 class DescentTracker(private val ext: TemplateExtension) {
 
     @Volatile var descents: List<Descent> = emptyList()
 
-    // stato letto dai campi dati
     @Volatile var active = false
     @Volatile var holding = false
     @Volatile var delta = 0.0
@@ -158,6 +164,7 @@ class DescentTracker(private val ext: TemplateExtension) {
     @Volatile var ahead = false
     @Volatile var komAvgText = "--"
     @Volatile var myAvgText = "--"
+    @Volatile var remainingText = "--"
     @Volatile var nearestDist = -1.0
 
     private var cur: Descent? = null
@@ -183,7 +190,6 @@ class DescentTracker(private val ext: TemplateExtension) {
                 try { onLoc(loc.lat, loc.lng) } catch (e: Exception) { }
             }
         }
-        // ricarica periodica: prende i segmenti nuovi sincronizzati dall'app
         Thread {
             while (true) {
                 try {
@@ -220,7 +226,7 @@ class DescentTracker(private val ext: TemplateExtension) {
             }
             if (holding) {
                 holding = false
-                deltaText = "--"; komAvgText = "--"; myAvgText = "--"
+                deltaText = "--"; komAvgText = "--"; myAvgText = "--"; remainingText = "--"
                 ahead = false; delta = 0.0
             }
             val n = near
@@ -265,8 +271,9 @@ class DescentTracker(private val ext: TemplateExtension) {
         delta = elapsed - c.komSec * expectedFrac(c.curve, frac)
         deltaText = fmtDelta(delta)
         ahead = delta < 0
-        komAvgText = "%.0f".format(c.lengthM / c.komSec * 3.6)
+        komAvgText = "%.0f".format(komAvgKmh(c))
         myAvgText = if (elapsed > 1.0) "%.0f".format(along / elapsed * 3.6) else "0"
+        remainingText = fmtKm(polyLen - along)
 
         val toEnd = haversine(lat, lng, c.endLat, c.endLng)
         if (frac >= 0.97 || (frac > 0.85 && toEnd < 40.0)) finish(elapsed)
@@ -293,8 +300,9 @@ class DescentTracker(private val ext: TemplateExtension) {
         delta = 0.0
         deltaText = "0"
         ahead = false
-        komAvgText = "%.0f".format(d.lengthM / d.komSec * 3.6)
+        komAvgText = "%.0f".format(komAvgKmh(d))
         myAvgText = "0"
+        remainingText = fmtKm(polyLen)
         ext.beepStart()
     }
 
@@ -304,6 +312,7 @@ class DescentTracker(private val ext: TemplateExtension) {
         delta = fin
         deltaText = fmtDelta(fin)
         ahead = fin < 0
+        remainingText = "0.00"
         holdUntil = System.currentTimeMillis() + 15000L
         holding = true
         active = false
@@ -322,6 +331,7 @@ class DescentTracker(private val ext: TemplateExtension) {
         deltaText = "--"
         komAvgText = "--"
         myAvgText = "--"
+        remainingText = "--"
         ahead = false
     }
 }
@@ -380,8 +390,16 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
             if (d.poly.isNotEmpty()) {
                 emitter.onNext(ShowPolyline("discesa-$i", d.poly, 0xFFFF6600.toInt(), 8))
             }
-            symbols.add(Symbol.POI("disc-start-$i", d.lat, d.lng, Symbol.POI.Types.SUMMIT, "INIZIO ${d.name}"))
-            symbols.add(Symbol.POI("disc-end-$i", d.endLat, d.endLng, Symbol.POI.Types.CONTROL, "FINE ${d.name}"))
+            val kmh = komAvgKmh(d)
+            val tag = if (kmh > 0) " · KOM ${"%.0f".format(kmh)} km/h" else ""
+            symbols.add(
+                Symbol.POI("disc-start-$i", d.lat, d.lng, Symbol.POI.Types.SUMMIT,
+                    "INIZIO ${d.name}$tag")
+            )
+            symbols.add(
+                Symbol.POI("disc-end-$i", d.endLat, d.endLng, Symbol.POI.Types.CONTROL,
+                    "FINE ${d.name}$tag")
+            )
         }
         if (symbols.isNotEmpty()) emitter.onNext(ShowSymbols(symbols))
     }
@@ -465,6 +483,7 @@ class DescentDeltaType(
                     rv.setTextViewText(R.id.field_kom_avg, "KOM ${t.komAvgText}")
                     rv.setTextViewText(R.id.field_my_avg, "Io ${t.myAvgText}")
                     rv.setTextViewText(R.id.field_delta_value, t.deltaText)
+                    rv.setTextViewText(R.id.field_remaining, "${t.remainingText} km")
                     val color = when {
                         t.deltaText == "--" -> 0xFFFFFFFF.toInt()
                         t.ahead -> 0xFF33CC33.toInt()
