@@ -7,6 +7,7 @@
     android:padding="2dp">
 
     <LinearLayout
+        android:id="@+id/field_left"
         android:layout_width="0dp"
         android:layout_height="match_parent"
         android:layout_weight="1"
