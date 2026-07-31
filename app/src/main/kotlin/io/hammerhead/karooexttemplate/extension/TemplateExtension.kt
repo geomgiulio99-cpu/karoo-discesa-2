@@ -232,9 +232,8 @@ class DescentTracker(private val ext: TemplateExtension) {
                 ) { ev: OnStreamState ->
                     val st = ev.state
                     if (st is StreamState.Streaming) {
-                        val v = st.dataPoint.values[DataType.Field.SINGLE]
+                        val v = st.dataPoint.singleValue
                         if (v != null && v >= 0.0) {
-                            // il sistema fornisce m/s: converto (se fosse già km/h il valore è alto)
                             lapAvgKmh = if (v < 30.0) v * 3.6 else v
                         }
                     }
@@ -351,8 +350,8 @@ class DescentTracker(private val ext: TemplateExtension) {
         delta = smoothVal
         deltaText = fmtDelta(smoothVal)
         ahead = smoothVal < 0
-        komAvgText = "%.0f".format(komAvgKmh(c))
-        myAvgText = if (elapsed > 1.0) "%.0f".format(alongMax / elapsed * 3.6) else "0"
+        komAvgText = "%.1f".format(komAvgKmh(c))
+        myAvgText = if (elapsed > 1.0) "%.1f".format(alongMax / elapsed * 3.6) else "0.0"
         remainingText = fmtKm(polyLen - alongMax)
 
         val toEnd = haversine(lat, lng, c.endLat, c.endLng)
@@ -382,8 +381,8 @@ class DescentTracker(private val ext: TemplateExtension) {
         delta = 0.0
         deltaText = "0"
         ahead = false
-        komAvgText = "%.0f".format(komAvgKmh(d))
-        myAvgText = "0"
+        komAvgText = "%.1f".format(komAvgKmh(d))
+        myAvgText = "0.0"
         remainingText = fmtKm(polyLen)
         ext.beepStart()
         ext.markLap()
