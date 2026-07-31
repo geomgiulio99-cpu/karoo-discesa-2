@@ -23,6 +23,7 @@ import io.hammerhead.karooext.models.UpdateGraphicConfig
 import io.hammerhead.karooext.models.ViewConfig
 import io.hammerhead.karooexttemplate.R
 import org.json.JSONArray
+import io.hammerhead.karooext.models.SystemNotification
 
 data class Descent(
     val name: String,
@@ -442,7 +443,41 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
         super.onCreate()
         karooSystem = KarooSystemService(applicationContext)
         tracker.reload(applicationContext)
-        karooSystem.connect { tracker.start(applicationContext) }
+        karooSystem.connect {
+            tracker.start(applicationContext)
+            syncAtBoot()
+        }
+    }
+
+    private fun syncAtBoot() {
+        Thread {
+            var attempt = 0
+            while (attempt < 5) {
+                attempt++
+                val n = SegmentSync.sync(applicationContext, 30 * 60 * 1000L) { }
+                if (n >= 0) {
+                    tracker.reload(applicationContext)
+                    notifyUser("Discese KOM", "$n segmenti in discesa pronti")
+                    return@Thread
+                }
+                if (n == SegmentSync.SKIPPED) return@Thread
+                try { Thread.sleep(180000) } catch (e: Exception) { return@Thread }
+            }
+            notifyUser("Discese KOM", "Sincronizzazione non riuscita: apri l'app con la rete attiva")
+        }.start()
+    }
+
+    private fun notifyUser(header: String, msg: String) {
+        try {
+            karooSystem.dispatch(
+                SystemNotification(
+                    id = "discese-sync-${System.currentTimeMillis()}",
+                    message = msg,
+                    header = header,
+                    style = SystemNotification.Style.EVENT
+                )
+            )
+        } catch (e: Exception) { }
     }
 
     fun markLap() {
