@@ -10,35 +10,35 @@
         android:id="@+id/field_left"
         android:layout_width="0dp"
         android:layout_height="match_parent"
-        android:layout_weight="1"
+        android:layout_weight="1.35"
         android:orientation="vertical"
         android:gravity="center_vertical">
 
         <TextView
             android:id="@+id/field_kom_avg"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:textColor="#FFFFFF"
-            android:textSize="26sp"
+            android:textSize="23sp"
             android:includeFontPadding="false"
-            android:maxLines="1"
+            android:singleLine="true"
             android:text="KOM --" />
 
         <TextView
             android:id="@+id/field_my_avg"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:textColor="#4FC3F7"
-            android:textSize="26sp"
+            android:textSize="23sp"
             android:includeFontPadding="false"
-            android:maxLines="1"
+            android:singleLine="true"
             android:text="Io --" />
     </LinearLayout>
 
     <LinearLayout
         android:layout_width="0dp"
         android:layout_height="match_parent"
-        android:layout_weight="1.4"
+        android:layout_weight="1.05"
         android:orientation="vertical"
         android:gravity="center">
 
@@ -51,7 +51,7 @@
             android:textStyle="bold"
             android:textSize="38sp"
             android:includeFontPadding="false"
-            android:maxLines="1"
+            android:singleLine="true"
             android:text="--" />
 
         <TextView
@@ -62,7 +62,7 @@
             android:textColor="#BBBBBB"
             android:textSize="15sp"
             android:includeFontPadding="false"
-            android:maxLines="1"
+            android:singleLine="true"
             android:text="-- km" />
     </LinearLayout>
 </LinearLayout>
