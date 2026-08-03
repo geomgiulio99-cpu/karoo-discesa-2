@@ -6,11 +6,14 @@ import android.location.Location
 import android.location.LocationListener
 import android.location.LocationManager
 import android.os.Bundle
+import android.widget.Button
+import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import io.hammerhead.karooexttemplate.extension.SegmentSync
 import io.hammerhead.karooexttemplate.extension.haversine
+import io.hammerhead.karooexttemplate.extension.komAvgKmh
 import io.hammerhead.karooexttemplate.extension.readDescents
 
 class MainActivity : ComponentActivity() {
@@ -34,13 +37,22 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val scroll = ScrollView(this)
+
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         output = TextView(this).apply {
             textSize = 15f
-            setPadding(24, 24, 24, 24)
+            setPadding(24, 24, 24, 12)
         }
+        val simBtn = Button(this).apply {
+            text = "SIMULA DISCESA"
+            setOnClickListener { startSim() }
+        }
+        val scroll = ScrollView(this)
         scroll.addView(output)
-        setContentView(scroll)
+        root.addView(scroll, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        root.addView(simBtn)
+        setContentView(root)
         render()
 
         Thread {
@@ -59,6 +71,31 @@ class MainActivity : ComponentActivity() {
             }
             runOnUiThread { render() }
         }.start()
+    }
+
+    private fun startSim() {
+        val list = readDescents(applicationContext)
+        if (list.isEmpty()) {
+            status = "Nessuna discesa in memoria: sincronizza prima."
+            render()
+            return
+        }
+        var idx = 0
+        val loc = lastLoc
+        if (loc != null) {
+            var best = -1.0
+            for (i in list.indices) {
+                val d = haversine(loc.latitude, loc.longitude, list[i].lat, list[i].lng)
+                if (best < 0 || d < best) { best = d; idx = i }
+            }
+        }
+        getSharedPreferences("karoo_discesa", MODE_PRIVATE).edit()
+            .putInt("simIdx", idx)
+            .putLong("simStart", System.currentTimeMillis())
+            .apply()
+        status = "Simulazione avviata su:\n${list[idx].name}\n\n" +
+                "Vai alla pagina di corsa e guarda il campo.\nDura circa 30-60 secondi."
+        render()
     }
 
     override fun onResume() {
@@ -105,8 +142,7 @@ class MainActivity : ComponentActivity() {
                 for (d in list) {
                     val dist = haversine(loc.latitude, loc.longitude, d.lat, d.lng)
                     if (best < 0 || dist < best) {
-                        best = dist; name = d.name
-                        kom = if (d.komSec > 0) d.lengthM / d.komSec * 3.6 else 0.0
+                        best = dist; name = d.name; kom = komAvgKmh(d)
                     }
                 }
                 sb.append("Discesa più vicina:\n• $name\n")
