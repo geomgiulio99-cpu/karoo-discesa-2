@@ -19,11 +19,11 @@ import io.hammerhead.karooext.models.ShowPolyline
 import io.hammerhead.karooext.models.ShowSymbols
 import io.hammerhead.karooext.models.StreamState
 import io.hammerhead.karooext.models.Symbol
+import io.hammerhead.karooext.models.SystemNotification
 import io.hammerhead.karooext.models.UpdateGraphicConfig
 import io.hammerhead.karooext.models.ViewConfig
 import io.hammerhead.karooexttemplate.R
 import org.json.JSONArray
-import io.hammerhead.karooext.models.SystemNotification
 
 data class Descent(
     val name: String,
@@ -89,7 +89,6 @@ fun haversine(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
 
 /**
  * Distanza dal SEGMENTO a-b (non dal punto più vicino) e frazione lungo di esso.
- * Ritorna [distanza_m, t] con t in 0..1
  */
 fun projSeg(
     plat: Double, plng: Double,
@@ -196,7 +195,9 @@ class DescentTracker(private val ext: TemplateExtension) {
     @Volatile var remainingText = "--"
     @Volatile var nearestDist = -1.0
     @Volatile var lapAvgKmh = -1.0
+    @Volatile var simulating = false
 
+    private var lastSimSeen = 0L
     private var cur: Descent? = null
     private var pts: List<DoubleArray> = emptyList()
     private var cum: DoubleArray = DoubleArray(0)
@@ -241,11 +242,23 @@ class DescentTracker(private val ext: TemplateExtension) {
                 }
             } catch (e: Exception) { null }
         }
+        // ciclo di servizio: ricarica i segmenti e controlla la richiesta di simulazione
         Thread {
             while (true) {
                 try {
-                    if (!active) reload(context)
-                    Thread.sleep(60000)
+                    if (!active && !simulating) reload(context)
+                    val p = context.getSharedPreferences("karoo_discesa", Context.MODE_PRIVATE)
+                    val s = p.getLong("simStart", 0L)
+                    if (s > 0 && s != lastSimSeen && System.currentTimeMillis() - s < 300000) {
+                        lastSimSeen = s
+                        val idx = p.getInt("simIdx", 0)
+                        val list = descents
+                        if (idx in list.indices) {
+                            val d = list[idx]
+                            Thread { runSim(d) }.start()
+                        }
+                    }
+                    Thread.sleep(1000)
                 } catch (e: Exception) { return@Thread }
             }
         }.start()
@@ -256,6 +269,54 @@ class DescentTracker(private val ext: TemplateExtension) {
         lapConsumer?.let { try { ext.karooSystem.removeConsumer(it) } catch (e: Exception) { } }
         locConsumer = null
         lapConsumer = null
+    }
+
+    private fun runSim(d: Descent) {
+        if (d.komSec <= 0 || d.lengthM <= 0) return
+        simulating = true
+        active = true
+        holding = false
+        val len = d.lengthM
+        komAvgText = "%.1f".format(komAvgKmh(d))
+        myAvgText = "0.0"
+        deltaText = "0"
+        remainingText = fmtKm(len)
+        ahead = false
+        var sv = 0.0
+        var init = false
+        ext.beepStart()
+        ext.markLap()
+
+        val speed = len / d.komSec * 0.93   // un filo più lento del KOM
+        var vt = 0.0
+        while (vt < d.komSec * 1.4) {
+            vt += 5.0
+            val along = Math.min(len, speed * vt)
+            val frac = along / len
+            val raw = vt - d.komSec * expectedFrac(d.curve, frac)
+            if (!init) { sv = raw; init = true } else sv += (raw - sv) * 0.15
+            delta = sv
+            deltaText = fmtDelta(sv)
+            ahead = sv < 0
+            myAvgText = "%.1f".format(along / vt * 3.6)
+            remainingText = fmtKm(len - along)
+            if (frac >= 0.999) break
+            try { Thread.sleep(500) } catch (e: Exception) { break }
+        }
+
+        val fin = vt - d.komSec
+        delta = fin
+        deltaText = fmtDelta(fin)
+        ahead = fin < 0
+        remainingText = "0.00"
+        active = false
+        holding = true
+        ext.beepEnd()
+        ext.markLap()
+        try { Thread.sleep(15000) } catch (e: Exception) { }
+        holding = false
+        simulating = false
+        deltaText = "--"; komAvgText = "--"; myAvgText = "--"; remainingText = "--"
     }
 
     private fun idxAt(dist: Double): Int {
@@ -270,6 +331,7 @@ class DescentTracker(private val ext: TemplateExtension) {
     }
 
     private fun onLoc(lat: Double, lng: Double) {
+        if (simulating) return
         val list = descents
         if (list.isEmpty()) return
         val now = System.currentTimeMillis()
@@ -322,7 +384,6 @@ class DescentTracker(private val ext: TemplateExtension) {
         prevLat = lat
         prevLng = lng
 
-        // progressione monotona: niente balletti avanti/indietro
         if (along > alongMax) {
             if (along > alongMax + 2.0) lastProgressMs = now
             alongMax = along
@@ -333,7 +394,6 @@ class DescentTracker(private val ext: TemplateExtension) {
         val stalled = now - lastProgressMs
         if (offTrack >= 15 && stalled > 20000 && now - startMs > 20000) { abort(); return }
 
-        // il cronometro parte davvero 15 m dentro il segmento
         if (alongMax < 15.0) {
             startMs = now
             smoothInit = false
@@ -520,7 +580,7 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
                 emitter.onNext(ShowPolyline("discesa-$i", d.poly, 0xFFFF6600.toInt(), 8))
             }
             val kmh = komAvgKmh(d)
-            val tag = if (kmh > 0) "KOM ${"%.0f".format(kmh)} km/h · " else ""
+            val tag = if (kmh > 0) "KOM ${"%.1f".format(kmh)} km/h · " else ""
             symbols.add(
                 Symbol.POI("disc-start-$i", d.lat, d.lng, Symbol.POI.Types.SUMMIT,
                     "${tag}INIZIO ${d.name}")
@@ -582,7 +642,8 @@ class DescentDeltaType(
             while (run) {
                 try {
                     val t = ext.tracker
-                    val v = if (t.active || t.holding) t.delta else t.lapAvgKmh
+                    val v = if (t.active || t.holding) t.delta
+                    else if (t.lapAvgKmh >= 0) t.lapAvgKmh else 0.0
                     emitter.onNext(
                         StreamState.Streaming(
                             DataPoint(dataTypeId, mapOf(DataType.Field.SINGLE to v))
@@ -616,7 +677,6 @@ class DescentDeltaType(
                         }
                         rv.setTextColor(R.id.field_delta_value, color)
                     } else {
-                        // fuori dal segmento: media del giro in corso
                         rv.setViewVisibility(R.id.field_left, View.GONE)
                         val lap = t.lapAvgKmh
                         rv.setTextViewText(
