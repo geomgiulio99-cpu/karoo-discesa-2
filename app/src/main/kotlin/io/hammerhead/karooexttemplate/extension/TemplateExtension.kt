@@ -87,9 +87,6 @@ fun haversine(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
     return r * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
 }
 
-/**
- * Distanza dal SEGMENTO a-b (non dal punto più vicino) e frazione lungo di esso.
- */
 fun projSeg(
     plat: Double, plng: Double,
     alat: Double, alng: Double,
@@ -183,6 +180,12 @@ fun readDescents(context: Context): List<Descent> {
 
 class DescentTracker(private val ext: TemplateExtension) {
 
+    companion object {
+        const val START_RADIUS = 40.0      // raggio di aggancio all'inizio
+        const val APPROACH_RADIUS = 250.0  // raggio dell'avviso di avvicinamento
+        const val MAX_JUMP = 80.0          // avanzamento massimo per rilevamento
+    }
+
     @Volatile var descents: List<Descent> = emptyList()
 
     @Volatile var active = false
@@ -197,6 +200,8 @@ class DescentTracker(private val ext: TemplateExtension) {
     @Volatile var lapAvgKmh = -1.0
     @Volatile var simulating = false
 
+    private val cooldowns = HashMap<String, Long>()
+    private val announced = HashMap<String, Long>()
     private var lastSimSeen = 0L
     private var cur: Descent? = null
     private var pts: List<DoubleArray> = emptyList()
@@ -209,11 +214,12 @@ class DescentTracker(private val ext: TemplateExtension) {
     private var holdUntil = 0L
     private var smoothInit = false
     private var smoothVal = 0.0
-    private var cooldownKey = ""
-    private var cooldownUntil = 0L
     private var traveled = 0.0
     private var prevLat = 0.0
     private var prevLng = 0.0
+    private var lastLat = 0.0
+    private var lastLng = 0.0
+    private var haveLast = false
     private var locConsumer: String? = null
     private var lapConsumer: String? = null
 
@@ -242,7 +248,6 @@ class DescentTracker(private val ext: TemplateExtension) {
                 }
             } catch (e: Exception) { null }
         }
-        // ciclo di servizio: ricarica i segmenti e controlla la richiesta di simulazione
         Thread {
             while (true) {
                 try {
@@ -287,7 +292,7 @@ class DescentTracker(private val ext: TemplateExtension) {
         ext.beepStart()
         ext.markLap()
 
-        val speed = len / d.komSec * 0.93   // un filo più lento del KOM
+        val speed = len / d.komSec * 0.93
         var vt = 0.0
         while (vt < d.komSec * 1.4) {
             vt += 5.0
@@ -330,6 +335,50 @@ class DescentTracker(private val ext: TemplateExtension) {
         return lo
     }
 
+    private fun resetTexts() {
+        deltaText = "--"; komAvgText = "--"; myAvgText = "--"; remainingText = "--"
+        ahead = false; delta = 0.0
+    }
+
+    /** Avviso quando ci si avvicina a una discesa. */
+    private fun checkApproach(list: List<Descent>, lat: Double, lng: Double, now: Long) {
+        if (!haveLast) return
+        for (d in list) {
+            if (d.komSec <= 0.0 || d.lengthM <= 0.0) continue
+            val dd = haversine(lat, lng, d.lat, d.lng)
+            if (dd > APPROACH_RADIUS || dd < START_RADIUS) continue
+            val prevDd = haversine(lastLat, lastLng, d.lat, d.lng)
+            if (dd >= prevDd) continue            // ci si allontana
+            if (dd > haversine(lat, lng, d.endLat, d.endLng)) continue  // senso opposto
+            val last = announced[d.name] ?: 0L
+            if (now - last < 600000L) continue
+            announced[d.name] = now
+            ext.beepApproach()
+            ext.notifyUser(
+                "Discesa in arrivo",
+                "${d.name} · KOM ${"%.1f".format(komAvgKmh(d))} km/h"
+            )
+            return
+        }
+    }
+
+    /** Sceglie il miglior segmento agganciabile tra TUTTI quelli vicini. */
+    private fun pickSegment(list: List<Descent>, lat: Double, lng: Double, now: Long): Descent? {
+        var chosen: Descent? = null
+        var chosenD = Double.MAX_VALUE
+        for (d in list) {
+            if (d.komSec <= 0.0 || d.lengthM <= 0.0) continue
+            val cd = cooldowns[d.name]
+            if (cd != null && now < cd) continue
+            val dd = haversine(lat, lng, d.lat, d.lng)
+            if (dd > START_RADIUS) continue
+            // se sei più vicino alla fine che all'inizio, stai andando al contrario
+            if (haversine(lat, lng, d.endLat, d.endLng) < dd) continue
+            if (dd < chosenD) { chosenD = dd; chosen = d }
+        }
+        return chosen
+    }
+
     private fun onLoc(lat: Double, lng: Double) {
         if (simulating) return
         val list = descents
@@ -337,24 +386,25 @@ class DescentTracker(private val ext: TemplateExtension) {
         val now = System.currentTimeMillis()
 
         var best = -1.0
-        var near: Descent? = null
         for (d in list) {
             val dd = haversine(lat, lng, d.lat, d.lng)
-            if (best < 0 || dd < best) { best = dd; near = d }
+            if (best < 0 || dd < best) best = dd
         }
         nearestDist = best
 
         val c = cur
         if (c == null) {
-            if (now < holdUntil) { holding = true; return }
-            if (holding) {
+            checkApproach(list, lat, lng, now)
+            val chosen = pickSegment(list, lat, lng, now)
+            if (chosen != null) {
+                begin(chosen, lat, lng)
+            } else if (now < holdUntil) {
+                holding = true
+            } else if (holding) {
                 holding = false
-                deltaText = "--"; komAvgText = "--"; myAvgText = "--"; remainingText = "--"
-                ahead = false; delta = 0.0
+                resetTexts()
             }
-            val n = near ?: return
-            if (n.name == cooldownKey && now < cooldownUntil) return
-            if (best <= 30.0 && n.komSec > 0 && n.lengthM > 0) begin(n, lat, lng)
+            lastLat = lat; lastLng = lng; haveLast = true
             return
         }
 
@@ -365,8 +415,8 @@ class DescentTracker(private val ext: TemplateExtension) {
             along = traveled
             off = 0.0
         } else {
-            val lo = Math.max(0, idxAt(alongMax - 200.0) - 1)
-            val hi = Math.min(pts.size - 2, idxAt(alongMax + 800.0))
+            val lo = Math.max(0, idxAt(alongMax - 150.0) - 1)
+            val hi = Math.min(pts.size - 2, idxAt(alongMax + 200.0))
             var bo = Double.MAX_VALUE
             var ba = alongMax
             var i = lo
@@ -383,7 +433,12 @@ class DescentTracker(private val ext: TemplateExtension) {
         }
         prevLat = lat
         prevLng = lng
+        lastLat = lat
+        lastLng = lng
+        haveLast = true
 
+        // niente salti impossibili
+        if (along > alongMax + MAX_JUMP) along = alongMax
         if (along > alongMax) {
             if (along > alongMax + 2.0) lastProgressMs = now
             alongMax = along
@@ -415,6 +470,8 @@ class DescentTracker(private val ext: TemplateExtension) {
         myAvgText = if (elapsed > 1.0) "%.1f".format(alongMax / elapsed * 3.6) else "0.0"
         remainingText = fmtKm(polyLen - alongMax)
 
+        // il traguardo non può scattare nei primi 5 secondi
+        if (elapsed < 5.0) return
         val toEnd = haversine(lat, lng, c.endLat, c.endLng)
         if (frac >= 0.985 || (frac > 0.9 && toEnd < 50.0)) finish(elapsed)
     }
@@ -459,8 +516,7 @@ class DescentTracker(private val ext: TemplateExtension) {
         holdUntil = System.currentTimeMillis() + 15000L
         holding = true
         active = false
-        cooldownKey = c.name
-        cooldownUntil = System.currentTimeMillis() + 90000L
+        cooldowns[c.name] = System.currentTimeMillis() + 90000L
         cur = null
         pts = emptyList()
         ext.beepEnd()
@@ -469,21 +525,14 @@ class DescentTracker(private val ext: TemplateExtension) {
 
     private fun abort() {
         val c = cur
-        if (c != null) {
-            cooldownKey = c.name
-            cooldownUntil = System.currentTimeMillis() + 90000L
-        }
+        // dopo un annullamento si può riprovare quasi subito
+        if (c != null) cooldowns[c.name] = System.currentTimeMillis() + 15000L
         cur = null
         pts = emptyList()
         active = false
         holding = false
         offTrack = 0
-        delta = 0.0
-        deltaText = "--"
-        komAvgText = "--"
-        myAvgText = "--"
-        remainingText = "--"
-        ahead = false
+        resetTexts()
     }
 }
 
@@ -527,11 +576,11 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
         }.start()
     }
 
-    private fun notifyUser(header: String, msg: String) {
+    fun notifyUser(header: String, msg: String) {
         try {
             karooSystem.dispatch(
                 SystemNotification(
-                    id = "discese-sync-${System.currentTimeMillis()}",
+                    id = "discese-${System.currentTimeMillis()}",
                     message = msg,
                     header = header,
                     style = SystemNotification.Style.EVENT
@@ -542,6 +591,19 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
 
     fun markLap() {
         try { karooSystem.dispatch(MarkLap) } catch (e: Exception) { }
+    }
+
+    fun beepApproach() {
+        try {
+            karooSystem.dispatch(
+                PlayBeepPattern(
+                    listOf(
+                        PlayBeepPattern.Tone(1200, 90),
+                        PlayBeepPattern.Tone(1200, 90)
+                    )
+                )
+            )
+        } catch (e: Exception) { }
     }
 
     fun beepStart() {
