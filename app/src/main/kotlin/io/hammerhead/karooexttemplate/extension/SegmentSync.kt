@@ -24,8 +24,8 @@ object SegmentSync {
             .getLong("lastSync", 0L)
 
     /**
-     * Scarica i preferiti in discesa con KOM e profilo altimetrico.
-     * @return numero di discese salvate, oppure FAILED / SKIPPED
+     * Salva SEMPRE tutte le discese preferite; KOM e profilo vengono
+     * aggiunti man mano, senza mai ridurre la lista.
      */
     fun sync(context: Context, minIntervalMs: Long, progress: (String) -> Unit): Int {
         if (running) return SKIPPED
@@ -37,9 +37,21 @@ object SegmentSync {
         running = true
         try {
             val token = getAccessToken()
+
             val cache = try {
                 JSONObject(prefs.getString("segcache", "{}") ?: "{}")
             } catch (e: Exception) { JSONObject() }
+
+            // quel che già avevamo salvato, per non perdere nulla
+            val prev = HashMap<String, JSONObject>()
+            try {
+                val a = JSONArray(prefs.getString("descents", "[]") ?: "[]")
+                for (i in 0 until a.length()) {
+                    val o = a.getJSONObject(i)
+                    val k = o.optString("id", "")
+                    if (k.isNotEmpty()) prev[k] = o
+                }
+            } catch (e: Exception) { }
 
             progress("Scarico l'elenco dei preferiti...")
 
@@ -52,62 +64,91 @@ object SegmentSync {
                 progress("Preferiti trovati: ${starred.size}...")
                 if (arr.length() < 200) break
                 page++
-                Thread.sleep(300)
+                Thread.sleep(200)
             }
 
-            val onlyDescents = ArrayList<JSONObject>()
+            val descents = ArrayList<JSONObject>()
             for (s in starred) {
                 if (s.optDouble("average_grade", 0.0) < 0 && s.optJSONArray("start_latlng") != null) {
-                    onlyDescents.add(s)
+                    descents.add(s)
                 }
             }
 
-            progress("Preferiti: ${starred.size} · in discesa: ${onlyDescents.size}")
+            progress("Preferiti: ${starred.size} · in discesa: ${descents.size}")
 
             val result = JSONArray()
-            var done = 0
             var errors = 0
-            var partial = false
+            var fetched = 0
+            var missing = 0
+            var budget = true
 
-            for (seg in onlyDescents) {
+            for (seg in descents) {
                 val id = seg.getLong("id")
                 val key = id.toString()
-                var kom = "n/d"
+
+                var kom = ""
                 var poly = ""
                 var curve = ""
 
-                if (cache.has(key)) {
-                    val c = cache.getJSONObject(key)
-                    kom = c.optString("kom", "n/d")
+                // 1) dalla cache
+                val c = if (cache.has(key)) cache.getJSONObject(key) else null
+                if (c != null) {
+                    kom = c.optString("kom", "")
                     poly = c.optString("poly", "")
                     curve = c.optString("curve", "")
-                } else {
+                }
+                // 2) da quel che avevamo già salvato
+                val pv = prev[key]
+                if (pv != null) {
+                    if (kom.isBlank()) kom = pv.optString("kom", "")
+                    if (poly.isBlank()) poly = pv.optString("poly", "")
+                    if (curve.isBlank()) curve = pv.optString("curve", "")
+                }
+
+                // 3) scarico solo quel che manca, e solo se c'è budget
+                if (budget && (kom.isBlank() || poly.isBlank())) {
                     try {
                         val detail = JSONObject(apiGet("/segments/$id", token))
-                        kom = detail.optJSONObject("xoms")?.optString("kom")?.ifBlank { null } ?: "n/d"
-                        poly = detail.optJSONObject("map")?.optString("polyline") ?: ""
-                        Thread.sleep(300)
-                        try {
-                            val st = JSONObject(
-                                apiGet("/segments/$id/streams?keys=distance,altitude&key_by_type=true", token)
-                            )
-                            curve = buildCurve(
-                                st.optJSONObject("distance")?.optJSONArray("data"),
-                                st.optJSONObject("altitude")?.optJSONArray("data")
-                            )
-                            Thread.sleep(300)
-                        } catch (e: Exception) { curve = "" }
-
-                        val c = JSONObject()
-                        c.put("kom", kom); c.put("poly", poly); c.put("curve", curve)
-                        cache.put(key, c)
+                        val k = detail.optJSONObject("xoms")?.optString("kom") ?: ""
+                        if (k.isNotBlank()) kom = k
+                        val p = detail.optJSONObject("map")?.optString("polyline") ?: ""
+                        if (p.isNotBlank()) poly = p
+                        fetched++
+                        Thread.sleep(250)
                     } catch (e: Exception) {
                         errors++
-                        if (errors >= 3) { partial = true; break }
-                        continue
+                        if (errors >= 3) budget = false
                     }
                 }
 
+                if (budget && curve.isBlank() && poly.isNotBlank()) {
+                    try {
+                        val st = JSONObject(
+                            apiGet("/segments/$id/streams?keys=distance,altitude&key_by_type=true", token)
+                        )
+                        curve = buildCurve(
+                            st.optJSONObject("distance")?.optJSONArray("data"),
+                            st.optJSONObject("altitude")?.optJSONArray("data")
+                        )
+                        fetched++
+                        Thread.sleep(250)
+                    } catch (e: Exception) {
+                        errors++
+                        if (errors >= 3) budget = false
+                    }
+                }
+
+                // aggiorno la cache con quel che ho
+                if (kom.isNotBlank() || poly.isNotBlank() || curve.isNotBlank()) {
+                    val nc = JSONObject()
+                    nc.put("kom", kom)
+                    nc.put("poly", poly)
+                    nc.put("curve", curve)
+                    cache.put(key, nc)
+                }
+                if (kom.isBlank() || curve.isBlank()) missing++
+
+                // il segmento entra SEMPRE nella lista
                 val start = seg.getJSONArray("start_latlng")
                 val end = seg.optJSONArray("end_latlng")
                 val sLat = start.getDouble(0)
@@ -116,25 +157,34 @@ object SegmentSync {
                 val eLng = if (end != null && end.length() >= 2) end.getDouble(1) else sLng
 
                 val o = JSONObject()
+                o.put("id", key)
                 o.put("name", seg.optString("name", "(senza nome)"))
                 o.put("lat", sLat); o.put("lng", sLng)
                 o.put("endLat", eLat); o.put("endLng", eLng)
-                o.put("poly", poly); o.put("kom", kom)
+                o.put("poly", poly)
+                o.put("kom", if (kom.isBlank()) "n/d" else kom)
                 o.put("len", seg.optDouble("distance", 0.0).toInt())
                 o.put("curve", curve)
                 result.put(o)
 
-                done++
-                if (done % 3 == 0) progress("Elaborate $done / ${onlyDescents.size} discese")
+                if (result.length() % 5 == 0) {
+                    progress("Discese: ${result.length()} / ${descents.size}" +
+                            if (!budget) "\n(limite Strava: completo più tardi)" else "")
+                }
             }
 
             val ed = prefs.edit()
             ed.putString("segcache", cache.toString())
-            if (result.length() > 0) ed.putString("descents", result.toString())
-            if (!partial) ed.putLong("lastSync", System.currentTimeMillis())
+            ed.putString("descents", result.toString())
+            // considero completa la sincronizzazione solo se non manca nulla
+            if (budget && missing == 0) ed.putLong("lastSync", System.currentTimeMillis())
+            else ed.putLong("lastSync", 0L)
             ed.apply()
 
-            if (partial) progress("Limite API Strava: salvate $done discese, riprova tra ~15 min")
+            if (!budget) {
+                progress("Limite Strava raggiunto.\n${result.length()} discese salvate, " +
+                        "$missing da completare: riapri tra ~15 minuti")
+            }
             return result.length()
         } catch (e: Exception) {
             progress("Errore: ${e.message}")
