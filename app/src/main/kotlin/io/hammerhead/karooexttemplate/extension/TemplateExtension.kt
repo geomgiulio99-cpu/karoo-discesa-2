@@ -13,6 +13,7 @@ import io.hammerhead.karooext.models.DataType
 import io.hammerhead.karooext.models.MapEffect
 import io.hammerhead.karooext.models.MarkLap
 import io.hammerhead.karooext.models.OnLocationChanged
+import io.hammerhead.karooext.models.OnNavigationState
 import io.hammerhead.karooext.models.OnStreamState
 import io.hammerhead.karooext.models.PlayBeepPattern
 import io.hammerhead.karooext.models.ShowPolyline
@@ -147,7 +148,6 @@ fun readDescents(context: Context): List<Descent> {
             val o = arr.getJSONObject(i)
             val la = o.getDouble("lat")
             val ln = o.getDouble("lng")
-
             val cs = o.optString("curve", "")
             val parts = if (cs.isEmpty()) emptyList() else cs.split(",")
             val curve = if (parts.size < 2) DoubleArray(0) else {
@@ -160,7 +160,6 @@ fun readDescents(context: Context): List<Descent> {
                 }
                 if (ok) c else DoubleArray(0)
             }
-
             out.add(
                 Descent(
                     o.optString("name", "?"),
@@ -181,13 +180,13 @@ fun readDescents(context: Context): List<Descent> {
 class DescentTracker(private val ext: TemplateExtension) {
 
     companion object {
-        const val START_RADIUS = 40.0      // raggio di aggancio all'inizio
-        const val APPROACH_RADIUS = 250.0  // raggio dell'avviso di avvicinamento
-        const val MAX_JUMP = 80.0          // avanzamento massimo per rilevamento
+        const val JOIN_OFF = 40.0
+        const val JOIN_FRAC = 0.25
+        const val APPROACH_RADIUS = 300.0
+        const val MAX_JUMP = 80.0
     }
 
     @Volatile var descents: List<Descent> = emptyList()
-
     @Volatile var active = false
     @Volatile var holding = false
     @Volatile var delta = 0.0
@@ -199,15 +198,19 @@ class DescentTracker(private val ext: TemplateExtension) {
     @Volatile var nearestDist = -1.0
     @Volatile var lapAvgKmh = -1.0
     @Volatile var simulating = false
+    @Volatile var armedName: String? = null
 
     private val cooldowns = HashMap<String, Long>()
     private val announced = HashMap<String, Long>()
+    private val polyCache = HashMap<String, List<DoubleArray>>()
     private var lastSimSeen = 0L
+    private var lastArmSeen = 0L
     private var cur: Descent? = null
     private var pts: List<DoubleArray> = emptyList()
     private var cum: DoubleArray = DoubleArray(0)
     private var polyLen = 0.0
     private var alongMax = 0.0
+    private var joinFrac = 0.0
     private var startMs = 0L
     private var offTrack = 0
     private var lastProgressMs = 0L
@@ -222,9 +225,41 @@ class DescentTracker(private val ext: TemplateExtension) {
     private var haveLast = false
     private var locConsumer: String? = null
     private var lapConsumer: String? = null
+    private var navConsumer: String? = null
 
     fun reload(context: Context) {
-        try { descents = readDescents(context) } catch (e: Exception) { }
+        try {
+            descents = readDescents(context)
+            polyCache.clear()
+        } catch (e: Exception) { }
+    }
+
+    private fun ptsOf(d: Descent): List<DoubleArray> {
+        val c = polyCache[d.name]
+        if (c != null) return c
+        val p = decodePolyline(d.poly)
+        polyCache[d.name] = p
+        return p
+    }
+
+    /** Il rider ha scelto "Vai a" su un nostro marcatore: arma quel segmento. */
+    fun onPoiChosen(poi: Symbol.POI) {
+        val id = poi.id
+        if (!id.startsWith("disc-")) return
+        val list = descents
+        if (list.isEmpty()) return
+        val nm = poi.name ?: ""
+        var found: Descent? = null
+        val idx = id.substringAfterLast("-").toIntOrNull()
+        if (idx != null && idx in list.indices && nm.contains(list[idx].name)) found = list[idx]
+        if (found == null) for (d in list) if (nm.isNotEmpty() && nm.contains(d.name)) { found = d; break }
+        val d = found ?: return
+        armedName = d.name
+        cooldowns.remove(d.name)
+        announced.remove(d.name)
+        ext.setArmed(d.name)
+        ext.beepApproach()
+        ext.notifyUser("Segmento armato", d.name)
     }
 
     fun start(context: Context) {
@@ -248,11 +283,22 @@ class DescentTracker(private val ext: TemplateExtension) {
                 }
             } catch (e: Exception) { null }
         }
+        if (navConsumer == null) {
+            navConsumer = try {
+                ext.karooSystem.addConsumer { ev: OnNavigationState ->
+                    val st = ev.state
+                    if (st is OnNavigationState.NavigationState.NavigatingToDestination) {
+                        try { onPoiChosen(st.destination) } catch (e: Exception) { }
+                    }
+                }
+            } catch (e: Exception) { null }
+        }
         Thread {
             while (true) {
                 try {
                     if (!active && !simulating) reload(context)
                     val p = context.getSharedPreferences("karoo_discesa", Context.MODE_PRIVATE)
+
                     val s = p.getLong("simStart", 0L)
                     if (s > 0 && s != lastSimSeen && System.currentTimeMillis() - s < 300000) {
                         lastSimSeen = s
@@ -263,6 +309,14 @@ class DescentTracker(private val ext: TemplateExtension) {
                             Thread { runSim(d) }.start()
                         }
                     }
+
+                    val a = p.getLong("armedAt", 0L)
+                    if (a > 0 && a != lastArmSeen) {
+                        lastArmSeen = a
+                        armedName = p.getString("armedName", null)
+                        armedName?.let { cooldowns.remove(it) }
+                    }
+
                     Thread.sleep(1000)
                 } catch (e: Exception) { return@Thread }
             }
@@ -272,17 +326,18 @@ class DescentTracker(private val ext: TemplateExtension) {
     fun stop() {
         locConsumer?.let { try { ext.karooSystem.removeConsumer(it) } catch (e: Exception) { } }
         lapConsumer?.let { try { ext.karooSystem.removeConsumer(it) } catch (e: Exception) { } }
-        locConsumer = null
-        lapConsumer = null
+        navConsumer?.let { try { ext.karooSystem.removeConsumer(it) } catch (e: Exception) { } }
+        locConsumer = null; lapConsumer = null; navConsumer = null
     }
 
     private fun runSim(d: Descent) {
-        if (d.komSec <= 0 || d.lengthM <= 0) return
+        if (d.lengthM <= 0) return
+        val kom = if (d.komSec > 0) d.komSec else d.lengthM / 11.0
         simulating = true
         active = true
         holding = false
         val len = d.lengthM
-        komAvgText = "%.1f".format(komAvgKmh(d))
+        komAvgText = if (d.komSec > 0) "%.1f".format(komAvgKmh(d)) else "--"
         myAvgText = "0.0"
         deltaText = "0"
         remainingText = fmtKm(len)
@@ -292,13 +347,13 @@ class DescentTracker(private val ext: TemplateExtension) {
         ext.beepStart()
         ext.markLap()
 
-        val speed = len / d.komSec * 0.93
+        val speed = len / kom * 0.93
         var vt = 0.0
-        while (vt < d.komSec * 1.4) {
+        while (vt < kom * 1.4) {
             vt += 5.0
             val along = Math.min(len, speed * vt)
             val frac = along / len
-            val raw = vt - d.komSec * expectedFrac(d.curve, frac)
+            val raw = vt - kom * expectedFrac(d.curve, frac)
             if (!init) { sv = raw; init = true } else sv += (raw - sv) * 0.15
             delta = sv
             deltaText = fmtDelta(sv)
@@ -309,7 +364,7 @@ class DescentTracker(private val ext: TemplateExtension) {
             try { Thread.sleep(500) } catch (e: Exception) { break }
         }
 
-        val fin = vt - d.komSec
+        val fin = vt - kom
         delta = fin
         deltaText = fmtDelta(fin)
         ahead = fin < 0
@@ -340,43 +395,52 @@ class DescentTracker(private val ext: TemplateExtension) {
         ahead = false; delta = 0.0
     }
 
-    /** Avviso quando ci si avvicina a una discesa. */
+    /** [distanza dal tracciato, frazione lungo il tracciato, lunghezza totale] o null */
+    private fun onTrack(d: Descent, lat: Double, lng: Double): DoubleArray? {
+        val p = ptsOf(d)
+        if (p.size < 2) {
+            val ds = haversine(lat, lng, d.lat, d.lng)
+            return if (ds <= JOIN_OFF) doubleArrayOf(ds, 0.0, d.lengthM) else null
+        }
+        var total = 0.0
+        val c = DoubleArray(p.size)
+        for (i in 1 until p.size) {
+            total += haversine(p[i - 1][0], p[i - 1][1], p[i][0], p[i][1])
+            c[i] = total
+        }
+        if (total <= 0.0) return null
+        val limit = total * JOIN_FRAC
+        var bo = Double.MAX_VALUE
+        var ba = 0.0
+        var i = 0
+        while (i < p.size - 1 && c[i] <= limit) {
+            val r = projSeg(lat, lng, p[i][0], p[i][1], p[i + 1][0], p[i + 1][1])
+            if (r[0] < bo) { bo = r[0]; ba = c[i] + (c[i + 1] - c[i]) * r[1] }
+            i++
+        }
+        if (bo > JOIN_OFF) return null
+        return doubleArrayOf(bo, ba / total, total)
+    }
+
     private fun checkApproach(list: List<Descent>, lat: Double, lng: Double, now: Long) {
         if (!haveLast) return
         for (d in list) {
-            if (d.komSec <= 0.0 || d.lengthM <= 0.0) continue
+            if (d.lengthM <= 0.0) continue
             val dd = haversine(lat, lng, d.lat, d.lng)
-            if (dd > APPROACH_RADIUS || dd < START_RADIUS) continue
-            val prevDd = haversine(lastLat, lastLng, d.lat, d.lng)
-            if (dd >= prevDd) continue            // ci si allontana
-            if (dd > haversine(lat, lng, d.endLat, d.endLng)) continue  // senso opposto
+            if (dd > APPROACH_RADIUS || dd < 50.0) continue
+            if (dd >= haversine(lastLat, lastLng, d.lat, d.lng)) continue
+            if (dd > haversine(lat, lng, d.endLat, d.endLng)) continue
             val last = announced[d.name] ?: 0L
-            if (now - last < 600000L) continue
+            if (now - last < 300000L) continue
             announced[d.name] = now
             ext.beepApproach()
+            val km = komAvgKmh(d)
             ext.notifyUser(
                 "Discesa in arrivo",
-                "${d.name} · KOM ${"%.1f".format(komAvgKmh(d))} km/h"
+                if (km > 0) "${d.name} · KOM ${"%.1f".format(km)} km/h" else d.name
             )
             return
         }
-    }
-
-    /** Sceglie il miglior segmento agganciabile tra TUTTI quelli vicini. */
-    private fun pickSegment(list: List<Descent>, lat: Double, lng: Double, now: Long): Descent? {
-        var chosen: Descent? = null
-        var chosenD = Double.MAX_VALUE
-        for (d in list) {
-            if (d.komSec <= 0.0 || d.lengthM <= 0.0) continue
-            val cd = cooldowns[d.name]
-            if (cd != null && now < cd) continue
-            val dd = haversine(lat, lng, d.lat, d.lng)
-            if (dd > START_RADIUS) continue
-            // se sei più vicino alla fine che all'inizio, stai andando al contrario
-            if (haversine(lat, lng, d.endLat, d.endLng) < dd) continue
-            if (dd < chosenD) { chosenD = dd; chosen = d }
-        }
-        return chosen
     }
 
     private fun onLoc(lat: Double, lng: Double) {
@@ -395,9 +459,45 @@ class DescentTracker(private val ext: TemplateExtension) {
         val c = cur
         if (c == null) {
             checkApproach(list, lat, lng, now)
-            val chosen = pickSegment(list, lat, lng, now)
-            if (chosen != null) {
-                begin(chosen, lat, lng)
+
+            var chosen: Descent? = null
+            var chosenInfo: DoubleArray? = null
+
+            val arm = armedName
+            if (arm != null) {
+                for (d in list) {
+                    if (d.name != arm) continue
+                    val info = onTrack(d, lat, lng)
+                    if (info != null) { chosen = d; chosenInfo = info }
+                    break
+                }
+            }
+
+            if (chosen == null) {
+                var bestFrac = Double.MAX_VALUE
+                var bestOff = Double.MAX_VALUE
+                for (d in list) {
+                    if (d.lengthM <= 0.0) continue
+                    val cd = cooldowns[d.name]
+                    if (cd != null && now < cd) continue
+                    val ds = haversine(lat, lng, d.lat, d.lng)
+                    if (ds > 600.0) continue
+                    if (haversine(lat, lng, d.endLat, d.endLng) < ds) continue
+                    val info = onTrack(d, lat, lng) ?: continue
+                    if (info[1] < bestFrac - 0.02 ||
+                        (Math.abs(info[1] - bestFrac) <= 0.02 && info[0] < bestOff)) {
+                        bestFrac = info[1]; bestOff = info[0]
+                        chosen = d; chosenInfo = info
+                    }
+                }
+            }
+
+            if (chosen != null && chosenInfo != null) {
+                if (chosen.name == armedName) {
+                    armedName = null
+                    ext.clearArmed()
+                }
+                begin(chosen, chosenInfo[1], chosenInfo[2], lat, lng)
             } else if (now < holdUntil) {
                 holding = true
             } else if (holding) {
@@ -431,13 +531,9 @@ class DescentTracker(private val ext: TemplateExtension) {
             off = bo
             along = ba
         }
-        prevLat = lat
-        prevLng = lng
-        lastLat = lat
-        lastLng = lng
-        haveLast = true
+        prevLat = lat; prevLng = lng
+        lastLat = lat; lastLng = lng; haveLast = true
 
-        // niente salti impossibili
         if (along > alongMax + MAX_JUMP) along = alongMax
         if (along > alongMax) {
             if (along > alongMax + 2.0) lastProgressMs = now
@@ -449,45 +545,48 @@ class DescentTracker(private val ext: TemplateExtension) {
         val stalled = now - lastProgressMs
         if (offTrack >= 15 && stalled > 20000 && now - startMs > 20000) { abort(); return }
 
-        if (alongMax < 15.0) {
-            startMs = now
-            smoothInit = false
-        }
-
         val elapsed = (now - startMs) / 1000.0
         var frac = if (polyLen > 0) alongMax / polyLen else 0.0
         if (frac < 0.0) frac = 0.0
         if (frac > 1.0) frac = 1.0
 
-        val raw = elapsed - c.komSec * expectedFrac(c.curve, frac)
-        if (!smoothInit) { smoothVal = raw; smoothInit = true }
-        else smoothVal += (raw - smoothVal) * 0.15
-
-        delta = smoothVal
-        deltaText = fmtDelta(smoothVal)
-        ahead = smoothVal < 0
-        komAvgText = "%.1f".format(komAvgKmh(c))
-        myAvgText = if (elapsed > 1.0) "%.1f".format(alongMax / elapsed * 3.6) else "0.0"
+        if (c.komSec > 0.0) {
+            val target = c.komSec * (expectedFrac(c.curve, frac) - expectedFrac(c.curve, joinFrac))
+            val raw = elapsed - target
+            if (!smoothInit) { smoothVal = raw; smoothInit = true }
+            else smoothVal += (raw - smoothVal) * 0.15
+            delta = smoothVal
+            deltaText = fmtDelta(smoothVal)
+            ahead = smoothVal < 0
+            komAvgText = "%.1f".format(komAvgKmh(c))
+        } else {
+            delta = elapsed
+            deltaText = "%.0f".format(elapsed)
+            ahead = false
+            komAvgText = "--"
+        }
+        myAvgText = if (elapsed > 1.0)
+            "%.1f".format((alongMax - joinFrac * polyLen) / elapsed * 3.6) else "0.0"
         remainingText = fmtKm(polyLen - alongMax)
 
-        // il traguardo non può scattare nei primi 5 secondi
         if (elapsed < 5.0) return
         val toEnd = haversine(lat, lng, c.endLat, c.endLng)
         if (frac >= 0.985 || (frac > 0.9 && toEnd < 50.0)) finish(elapsed)
     }
 
-    private fun begin(d: Descent, lat: Double, lng: Double) {
+    private fun begin(d: Descent, jFrac: Double, totalLen: Double, lat: Double, lng: Double) {
         cur = d
-        pts = decodePolyline(d.poly)
+        pts = ptsOf(d)
         cum = DoubleArray(if (pts.isEmpty()) 1 else pts.size)
         polyLen = 0.0
         for (i in 1 until pts.size) {
             polyLen += haversine(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1])
             cum[i] = polyLen
         }
-        if (polyLen <= 0.0) polyLen = d.lengthM
-        alongMax = 0.0
-        traveled = 0.0
+        if (polyLen <= 0.0) polyLen = if (totalLen > 0) totalLen else d.lengthM
+        joinFrac = jFrac
+        alongMax = joinFrac * polyLen
+        traveled = alongMax
         startMs = System.currentTimeMillis()
         lastProgressMs = startMs
         offTrack = 0
@@ -499,19 +598,21 @@ class DescentTracker(private val ext: TemplateExtension) {
         delta = 0.0
         deltaText = "0"
         ahead = false
-        komAvgText = "%.1f".format(komAvgKmh(d))
+        komAvgText = if (d.komSec > 0) "%.1f".format(komAvgKmh(d)) else "--"
         myAvgText = "0.0"
-        remainingText = fmtKm(polyLen)
+        remainingText = fmtKm(polyLen - alongMax)
         ext.beepStart()
         ext.markLap()
     }
 
     private fun finish(elapsed: Double) {
         val c = cur ?: return
-        val fin = elapsed - c.komSec
+        val fin = if (c.komSec > 0)
+            elapsed - c.komSec * (1.0 - expectedFrac(c.curve, joinFrac))
+        else elapsed
         delta = fin
-        deltaText = fmtDelta(fin)
-        ahead = fin < 0
+        deltaText = if (c.komSec > 0) fmtDelta(fin) else "%.0f".format(fin)
+        ahead = c.komSec > 0 && fin < 0
         remainingText = "0.00"
         holdUntil = System.currentTimeMillis() + 15000L
         holding = true
@@ -525,7 +626,6 @@ class DescentTracker(private val ext: TemplateExtension) {
 
     private fun abort() {
         val c = cur
-        // dopo un annullamento si può riprovare quasi subito
         if (c != null) cooldowns[c.name] = System.currentTimeMillis() + 15000L
         cur = null
         pts = emptyList()
@@ -556,6 +656,22 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
             tracker.start(applicationContext)
             syncAtBoot()
         }
+    }
+
+    fun setArmed(name: String) {
+        try {
+            applicationContext
+                .getSharedPreferences("karoo_discesa", Context.MODE_PRIVATE)
+                .edit().putString("armedName", name).apply()
+        } catch (e: Exception) { }
+    }
+
+    fun clearArmed() {
+        try {
+            applicationContext
+                .getSharedPreferences("karoo_discesa", Context.MODE_PRIVATE)
+                .edit().remove("armedName").apply()
+        } catch (e: Exception) { }
     }
 
     private fun syncAtBoot() {
@@ -733,7 +849,7 @@ class DescentDeltaType(
                         rv.setTextViewText(R.id.field_delta_value, t.deltaText)
                         rv.setTextViewText(R.id.field_remaining, "${t.remainingText} km")
                         val color = when {
-                            t.deltaText == "--" -> 0xFFFFFFFF.toInt()
+                            t.deltaText == "--" || t.komAvgText == "--" -> 0xFFFFFFFF.toInt()
                             t.ahead -> 0xFF33CC33.toInt()
                             else -> 0xFFFF4444.toInt()
                         }
