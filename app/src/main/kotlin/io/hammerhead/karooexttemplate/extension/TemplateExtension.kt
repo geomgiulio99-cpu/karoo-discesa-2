@@ -223,6 +223,8 @@ class DescentTracker(private val ext: TemplateExtension) {
     private var lastLat = 0.0
     private var lastLng = 0.0
     private var haveLast = false
+    private var lastLocMs = 0L
+    private var minToEnd = Double.MAX_VALUE
     private var locConsumer: String? = null
     private var lapConsumer: String? = null
     private var navConsumer: String? = null
@@ -448,6 +450,8 @@ class DescentTracker(private val ext: TemplateExtension) {
         val list = descents
         if (list.isEmpty()) return
         val now = System.currentTimeMillis()
+        val gapMs = if (lastLocMs > 0L) now - lastLocMs else 1000L
+        lastLocMs = now
 
         var best = -1.0
         for (d in list) {
@@ -534,7 +538,11 @@ class DescentTracker(private val ext: TemplateExtension) {
         prevLat = lat; prevLng = lng
         lastLat = lat; lastLng = lng; haveLast = true
 
-        if (along > alongMax + MAX_JUMP) along = alongMax
+        // Il limite di salto e' un filtro sul rumore GPS, non un tetto di velocita':
+        // va commisurato al tempo passato dall'ultimo rilevamento, altrimenti dopo
+        // una pausa dello stream la progressione si blocca e non riparte piu'.
+        val jumpLimit = MAX_JUMP * Math.max(1.0, Math.min(gapMs / 1000.0, 10.0))
+        if (along > alongMax + jumpLimit) along = alongMax
         if (along > alongMax) {
             if (along > alongMax + 2.0) lastProgressMs = now
             alongMax = along
@@ -569,9 +577,12 @@ class DescentTracker(private val ext: TemplateExtension) {
             "%.1f".format((alongMax - joinFrac * polyLen) / elapsed * 3.6) else "0.0"
         remainingText = fmtKm(polyLen - alongMax)
 
-        if (elapsed < 5.0) return
         val toEnd = haversine(lat, lng, c.endLat, c.endLng)
-        if (frac >= 0.985 || (frac > 0.9 && toEnd < 50.0)) finish(elapsed)
+        if (toEnd < minToEnd) minToEnd = toEnd
+        if (elapsed < 5.0) return
+        // Traguardo passato: la distanza dall'arrivo ha smesso di calare e risale.
+        val crossed = frac > 0.85 && minToEnd < 60.0 && toEnd > minToEnd + 20.0
+        if (frac >= 0.985 || crossed || (frac > 0.9 && toEnd < 50.0)) finish(elapsed)
     }
 
     private fun begin(d: Descent, jFrac: Double, totalLen: Double, lat: Double, lng: Double) {
@@ -590,6 +601,7 @@ class DescentTracker(private val ext: TemplateExtension) {
         startMs = System.currentTimeMillis()
         lastProgressMs = startMs
         offTrack = 0
+        minToEnd = Double.MAX_VALUE
         smoothInit = false
         prevLat = lat
         prevLng = lng
@@ -607,9 +619,25 @@ class DescentTracker(private val ext: TemplateExtension) {
 
     private fun finish(elapsed: Double) {
         val c = cur ?: return
+
+        // Il tracciamento si chiude quasi sempre con qualche metro non misurato:
+        // la polilinea di Strava e' semplificata, i rilevamenti arrivano a ~1 Hz e
+        // la progressione e' monotona, quindi alongMax resta indietro rispetto a
+        // dove si e' davvero arrivati. Scontare comunque il KOM fino in fondo
+        // significava regalare il tempo di quel tratto: il risultato finale usciva
+        // sistematicamente troppo generoso, anche di diversi secondi.
+        // Il tratto non misurato viene invece percorso al proprio ritmo medio.
+        val ridden = alongMax - joinFrac * polyLen
+        var missing = polyLen - alongMax
+        if (missing < 0.0) missing = 0.0
+        val maxMissing = polyLen * 0.15
+        if (missing > maxMissing) missing = maxMissing
+        val total = if (ridden > 50.0 && elapsed > 1.0)
+            elapsed + missing * (elapsed / ridden) else elapsed
+
         val fin = if (c.komSec > 0)
-            elapsed - c.komSec * (1.0 - expectedFrac(c.curve, joinFrac))
-        else elapsed
+            total - c.komSec * (1.0 - expectedFrac(c.curve, joinFrac))
+        else total
         delta = fin
         deltaText = if (c.komSec > 0) fmtDelta(fin) else "%.0f".format(fin)
         ahead = c.komSec > 0 && fin < 0
@@ -632,6 +660,7 @@ class DescentTracker(private val ext: TemplateExtension) {
         active = false
         holding = false
         offTrack = 0
+        minToEnd = Double.MAX_VALUE
         resetTexts()
     }
 }
