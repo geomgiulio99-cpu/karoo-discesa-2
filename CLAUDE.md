@@ -30,17 +30,22 @@ Dopo ogni push: attendere la build verde, scaricare l'artifact, installare.
 
 ## Funzioni
 
-- Sincronizza da Strava **tutti** i segmenti preferiti in discesa
-  (`average_grade < 0`), con KOM e profilo altimetrico, e li tiene in cache.
-- Disegna le discese sulla mappa in arancione con bandierine INIZIO/FINE che
-  riportano la velocità media del KOM.
+- Sincronizza da Strava **tutti** i segmenti preferiti e li tiene in cache.
+  Ognuno porta il flag `desc` (`average_grade < 0`): solo le discese vengono
+  tracciate e armate, le altre stanno sulla mappa e basta. Il profilo
+  altimetrico viene scaricato solo per le discese — una chiamata invece di due
+  per tutti gli altri, e la loro mancanza di profilo non conta come
+  sincronizzazione incompleta.
+- Disegna le discese sulla mappa in arancione con bandierine INIZIO/FINE, e
+  ogni altro preferito con una bandierina singola. Tutte riportano la
+  velocità media del KOM davanti al nome.
 - Campo dati **Discesa vicina**: metri dalla partenza della discesa più vicina.
 - Campo dati **Distacco KOM** (grafico): dentro il segmento mostra a sinistra la
   media del KOM e la propria, a destra il distacco in grande (verde in vantaggio,
   rosso in ritardo) con sotto i km che mancano. Fuori dal segmento mostra la
   media oraria del giro in corso.
 - Beep di avvicinamento, di ingresso e di uscita; giro automatico (`MarkLap`)
-  all'ingresso e all'uscita; risultato finale fermo 15 secondi.
+  **solo all'ingresso**; risultato finale fermo 15 secondi.
 - Sincronizzazione automatica all'avvio dell'estensione, con notifica di sistema.
 - Simulazione di una discesa dal pulsante nell'app, per collaudare senza uscire.
 - Armamento manuale di un segmento: dalla mappa con "Vai a" su una bandierina,
@@ -64,7 +69,13 @@ Dopo ogni push: attendere la build verde, scaricare l'artifact, installare.
 - Non esiste alcun evento di **tocco sulla mappa**. L'unico appiglio è
   `OnNavigationState.NavigatingToDestination`, che restituisce il POI scelto
   quando il rider preme "Vai a".
-- Non è possibile inserirsi nella schermata nativa dei live segment.
+- Non è possibile inserirsi nella schermata nativa dei live segment. Esistono
+  però i tipi di dato nativi `SEGMENT_KOM`, `SEGMENT_TIME`, `SEGMENT_PR` e
+  simili: durante un segmento ufficiale si possono leggere tempo del KOM e
+  lunghezza, e ricavarne la media, ma **non il nome del segmento**.
+- `MarkLap` è un `data object` senza parametri: il menu lap che il Karoo mostra
+  quando si segna un giro **non è sopprimibile**. O si segna il giro accettando
+  il menu, o non lo si segna. Scelta presa: si segna solo all'ingresso.
 - I valori dei tipi di dato di sistema vanno letti con `dataPoint.singleValue`:
   il nome del campo cambia da tipo a tipo (per la media giro è `AVERAGE_SPEED`,
   non `SINGLE`).
