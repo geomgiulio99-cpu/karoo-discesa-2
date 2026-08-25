@@ -24,8 +24,11 @@ object SegmentSync {
             .getLong("lastSync", 0L)
 
     /**
-     * Salva SEMPRE tutte le discese preferite; KOM e profilo vengono
-     * aggiunti man mano, senza mai ridurre la lista.
+     * Salva SEMPRE tutti i segmenti preferiti; KOM e profilo vengono
+     * aggiunti man mano, senza mai ridurre la lista. Il profilo altimetrico
+     * viene scaricato solo per le discese, che sono le uniche tracciate.
+     *
+     * @return il numero di segmenti salvati, oppure FAILED / SKIPPED.
      */
     fun sync(context: Context, minIntervalMs: Long, progress: (String) -> Unit): Int {
         if (running) return SKIPPED
@@ -67,14 +70,16 @@ object SegmentSync {
                 Thread.sleep(200)
             }
 
-            val descents = ArrayList<JSONObject>()
+            // Tutti i preferiti finiscono in elenco: le discese per essere tracciate,
+            // gli altri per comparire sulla mappa con la media del KOM davanti al nome.
+            val segments = ArrayList<JSONObject>()
             for (s in starred) {
-                if (s.optDouble("average_grade", 0.0) < 0 && s.optJSONArray("start_latlng") != null) {
-                    descents.add(s)
-                }
+                if (s.optJSONArray("start_latlng") != null) segments.add(s)
             }
+            var nDescents = 0
+            for (s in segments) if (s.optDouble("average_grade", 0.0) < 0) nDescents++
 
-            progress("Preferiti: ${starred.size} · in discesa: ${descents.size}")
+            progress("Preferiti: ${starred.size} · in discesa: $nDescents")
 
             val result = JSONArray()
             var errors = 0
@@ -82,9 +87,10 @@ object SegmentSync {
             var missing = 0
             var budget = true
 
-            for (seg in descents) {
+            for (seg in segments) {
                 val id = seg.getLong("id")
                 val key = id.toString()
+                val isDescent = seg.optDouble("average_grade", 0.0) < 0
 
                 var kom = ""
                 var poly = ""
@@ -121,7 +127,7 @@ object SegmentSync {
                     }
                 }
 
-                if (budget && curve.isBlank() && poly.isNotBlank()) {
+                if (isDescent && budget && curve.isBlank() && poly.isNotBlank()) {
                     try {
                         val st = JSONObject(
                             apiGet("/segments/$id/streams?keys=distance,altitude&key_by_type=true", token)
@@ -146,7 +152,8 @@ object SegmentSync {
                     nc.put("curve", curve)
                     cache.put(key, nc)
                 }
-                if (kom.isBlank() || curve.isBlank()) missing++
+                // Il profilo serve solo alle discese: per gli altri non e' un buco.
+                if (kom.isBlank() || (isDescent && curve.isBlank())) missing++
 
                 // il segmento entra SEMPRE nella lista
                 val start = seg.getJSONArray("start_latlng")
@@ -165,10 +172,11 @@ object SegmentSync {
                 o.put("kom", if (kom.isBlank()) "n/d" else kom)
                 o.put("len", seg.optDouble("distance", 0.0).toInt())
                 o.put("curve", curve)
+                o.put("desc", isDescent)
                 result.put(o)
 
                 if (result.length() % 5 == 0) {
-                    progress("Discese: ${result.length()} / ${descents.size}" +
+                    progress("Segmenti: ${result.length()} / ${segments.size}" +
                             if (!budget) "\n(limite Strava: completo più tardi)" else "")
                 }
             }
@@ -182,7 +190,7 @@ object SegmentSync {
             ed.apply()
 
             if (!budget) {
-                progress("Limite Strava raggiunto.\n${result.length()} discese salvate, " +
+                progress("Limite Strava raggiunto.\n${result.length()} segmenti salvati, " +
                         "$missing da completare: riapri tra ~15 minuti")
             }
             return result.length()

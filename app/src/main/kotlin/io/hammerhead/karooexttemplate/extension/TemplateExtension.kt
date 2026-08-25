@@ -35,7 +35,9 @@ data class Descent(
     val poly: String,
     val komSec: Double,
     val lengthM: Double,
-    val curve: DoubleArray
+    val curve: DoubleArray,
+    /** Solo le discese vengono tracciate; le altre stanno sulla mappa e basta. */
+    val isDescent: Boolean = true
 )
 
 fun parseKom(s: String): Double {
@@ -138,7 +140,8 @@ fun decodePolyline(encoded: String): List<DoubleArray> {
     return poly
 }
 
-fun readDescents(context: Context): List<Descent> {
+/** Tutti i preferiti salvati: le discese e i segmenti che stanno solo sulla mappa. */
+fun readSegments(context: Context): List<Descent> {
     val prefs = context.getSharedPreferences("karoo_discesa", Context.MODE_PRIVATE)
     val raw = prefs.getString("descents", null) ?: return emptyList()
     val out = ArrayList<Descent>()
@@ -169,13 +172,18 @@ fun readDescents(context: Context): List<Descent> {
                     o.optString("poly", ""),
                     parseKom(o.optString("kom", "0")),
                     o.optDouble("len", 0.0),
-                    curve
+                    curve,
+                    o.optBoolean("desc", true)
                 )
             )
         }
     } catch (e: Exception) { }
     return out
 }
+
+/** Solo le discese: sono le uniche che l'estensione traccia e arma. */
+fun readDescents(context: Context): List<Descent> =
+    readSegments(context).filter { it.isDescent }
 
 class DescentTracker(private val ext: TemplateExtension) {
 
@@ -374,7 +382,6 @@ class DescentTracker(private val ext: TemplateExtension) {
         active = false
         holding = true
         ext.beepEnd()
-        ext.markLap()
         try { Thread.sleep(15000) } catch (e: Exception) { }
         holding = false
         simulating = false
@@ -648,8 +655,8 @@ class DescentTracker(private val ext: TemplateExtension) {
         cooldowns[c.name] = System.currentTimeMillis() + 90000L
         cur = null
         pts = emptyList()
+        // Nessun lap in uscita: il giro viene segnato solo all'ingresso.
         ext.beepEnd()
-        ext.markLap()
     }
 
     private fun abort() {
@@ -711,7 +718,7 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
                 val n = SegmentSync.sync(applicationContext, 30 * 60 * 1000L) { }
                 if (n >= 0) {
                     tracker.reload(applicationContext)
-                    notifyUser("Discese KOM", "$n segmenti in discesa pronti")
+                    notifyUser("Discese KOM", "$n segmenti preferiti pronti")
                     return@Thread
                 }
                 if (n == SegmentSync.SKIPPED) return@Thread
@@ -779,23 +786,35 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
     }
 
     override fun startMap(emitter: Emitter<MapEffect>) {
-        val descents = readDescents(applicationContext)
+        val segments = readSegments(applicationContext)
         val symbols = ArrayList<Symbol>()
-        for (i in descents.indices) {
-            val d = descents[i]
-            if (d.poly.isNotEmpty()) {
-                emitter.onNext(ShowPolyline("discesa-$i", d.poly, 0xFFFF6600.toInt(), 8))
-            }
-            val kmh = komAvgKmh(d)
+        // L'indice delle discese deve restare quello di readDescents(): onPoiChosen
+        // ci risale per armare il segmento, quindi si conta a parte.
+        var di = -1
+        for (s in segments) {
+            val kmh = komAvgKmh(s)
             val tag = if (kmh > 0) "KOM ${"%.1f".format(kmh)} km/h · " else ""
-            symbols.add(
-                Symbol.POI("disc-start-$i", d.lat, d.lng, Symbol.POI.Types.SUMMIT,
-                    "${tag}INIZIO ${d.name}")
-            )
-            symbols.add(
-                Symbol.POI("disc-end-$i", d.endLat, d.endLng, Symbol.POI.Types.CONTROL,
-                    "${tag}FINE ${d.name}")
-            )
+            if (s.isDescent) {
+                di++
+                if (s.poly.isNotEmpty()) {
+                    emitter.onNext(ShowPolyline("discesa-$di", s.poly, 0xFFFF6600.toInt(), 8))
+                }
+                symbols.add(
+                    Symbol.POI("disc-start-$di", s.lat, s.lng, Symbol.POI.Types.SUMMIT,
+                        "${tag}INIZIO ${s.name}")
+                )
+                symbols.add(
+                    Symbol.POI("disc-end-$di", s.endLat, s.endLng, Symbol.POI.Types.CONTROL,
+                        "${tag}FINE ${s.name}")
+                )
+            } else {
+                // Non tracciati: il prefisso "seg-" li tiene fuori dall'armamento.
+                val k = symbols.size
+                symbols.add(
+                    Symbol.POI("seg-start-$k", s.lat, s.lng, Symbol.POI.Types.GENERIC,
+                        "${tag}${s.name}")
+                )
+            }
         }
         if (symbols.isNotEmpty()) emitter.onNext(ShowSymbols(symbols))
     }

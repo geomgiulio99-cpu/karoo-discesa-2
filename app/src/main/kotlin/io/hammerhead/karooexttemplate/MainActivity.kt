@@ -17,6 +17,7 @@ import io.hammerhead.karooexttemplate.extension.SegmentSync
 import io.hammerhead.karooexttemplate.extension.haversine
 import io.hammerhead.karooexttemplate.extension.komAvgKmh
 import io.hammerhead.karooexttemplate.extension.readDescents
+import io.hammerhead.karooexttemplate.extension.readSegments
 
 class MainActivity : ComponentActivity() {
 
@@ -83,14 +84,17 @@ class MainActivity : ComponentActivity() {
                 SegmentSync.FAILED -> "Sincronizzazione non riuscita.\nControlla la connessione."
                 SegmentSync.SKIPPED -> "Sincronizzazione già in corso."
                 else -> {
-                    val all = readDescents(applicationContext)
+                    val all = readSegments(applicationContext)
+                    val desc = all.filter { it.isDescent }
                     var noKom = 0
                     var withCurve = 0
-                    for (d in all) {
+                    for (d in desc) {
                         if (d.komSec <= 0.0) noKom++
                         if (d.curve.size > 1) withCurve++
                     }
-                    "Pronto: $n discese salvate\n$withCurve con profilo · $noKom senza KOM"
+                    "Pronto: ${desc.size} discese tracciate\n" +
+                        "$withCurve con profilo · $noKom senza KOM\n" +
+                        "${all.size - desc.size} altri preferiti sulla mappa"
                 }
             }
             runOnUiThread { render() }
