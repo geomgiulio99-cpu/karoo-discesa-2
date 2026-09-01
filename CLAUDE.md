@@ -93,6 +93,19 @@ Dopo ogni push: attendere la build verde, scaricare l'artifact, installare.
 - **L'aggancio non può basarsi su un cerchio attorno alla partenza:** ad alta
   velocità si scavalca tra due rilevamenti GPS. Si aggancia sul tracciato nel
   primo quarto, compensando il punto d'ingresso.
+- **L'aggancio va però considerato provvisorio finché non si avanza davvero.**
+  `onTrack` prende il punto più vicino in tutto il primo quarto: sui tornanti, o
+  mentre si sta ancora salendo su una strada che passa entro `JOIN_OFF` dalla
+  discesa, quel punto può essere centinaia di metri più avanti. Il cronometro
+  partiva li' e la progressione restava ferma (è monotona, la posizione vera è
+  più indietro): il distacco live saliva di un secondo al secondo, fino a
+  decine di secondi, **senza che il risultato finale ne risentisse** — a fine
+  segmento la distribuzione si annulla. Per questo il difetto si vedeva solo
+  dal vivo. Ora la base scorre ogni 4 s finché non si vedono 15 m di
+  avanzamento reale.
+- **Un difetto che non tocca il numero finale può comunque rovinare quello
+  live.** Verificare i due separatamente: il totale corretto non dimostra
+  niente sulla correttezza istante per istante.
 - **Progressione monotona e salti limitati** (80 m per secondo trascorso dall'ultimo
   rilevamento), altrimenti il rumore GPS fa credere di aver finito il segmento in
   anticipo.
