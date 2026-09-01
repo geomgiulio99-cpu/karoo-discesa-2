@@ -233,6 +233,8 @@ class DescentTracker(private val ext: TemplateExtension) {
     private var haveLast = false
     private var lastLocMs = 0L
     private var minToEnd = Double.MAX_VALUE
+    private var confirmed = false
+    private var hookMs = 0L
     private var locConsumer: String? = null
     private var lapConsumer: String? = null
     private var navConsumer: String? = null
@@ -545,6 +547,39 @@ class DescentTracker(private val ext: TemplateExtension) {
         prevLat = lat; prevLng = lng
         lastLat = lat; lastLng = lng; haveLast = true
 
+        // L'aggancio non e' affidabile finche' non si vede avanzamento vero.
+        // onTrack sceglie il punto piu' vicino in tutto il primo quarto del
+        // tracciato: sui tornanti, o mentre si sta ancora salendo su una strada
+        // che passa a meno di JOIN_OFF dalla discesa, quel punto puo' essere
+        // centinaia di metri piu' avanti della posizione reale. Il cronometro
+        // partirebbe subito mentre la progressione resta ferma, e il distacco
+        // crescerebbe di un secondo al secondo senza che si stia perdendo nulla.
+        // Finche' la progressione non parte, la base di partenza scorre.
+        if (!confirmed) {
+            if (along > alongMax + 15.0) {
+                confirmed = true
+            } else if (now - startMs > 4000L) {
+                val info = onTrack(c, lat, lng)
+                if (info == null) {
+                    // Fuori dal primo quarto: l'aggancio non e' piu' rivedibile,
+                    // si prosegue con la base che si ha.
+                    confirmed = true
+                } else {
+                    startMs = now
+                    joinFrac = info[1]
+                    alongMax = joinFrac * polyLen
+                    traveled = alongMax
+                    smoothInit = false
+                    smoothVal = 0.0
+                    delta = 0.0
+                    deltaText = "0"
+                    ahead = false
+                    remainingText = fmtKm(polyLen - alongMax)
+                    return
+                }
+            }
+        }
+
         // Il limite di salto e' un filtro sul rumore GPS, non un tetto di velocita':
         // va commisurato al tempo passato dall'ultimo rilevamento, altrimenti dopo
         // una pausa dello stream la progressione si blocca e non riparte piu'.
@@ -558,7 +593,7 @@ class DescentTracker(private val ext: TemplateExtension) {
         if (off > 150.0) offTrack++ else offTrack = 0
 
         val stalled = now - lastProgressMs
-        if (offTrack >= 15 && stalled > 20000 && now - startMs > 20000) { abort(); return }
+        if (offTrack >= 15 && stalled > 20000 && now - hookMs > 20000) { abort(); return }
 
         val elapsed = (now - startMs) / 1000.0
         var frac = if (polyLen > 0) alongMax / polyLen else 0.0
@@ -606,6 +641,8 @@ class DescentTracker(private val ext: TemplateExtension) {
         alongMax = joinFrac * polyLen
         traveled = alongMax
         startMs = System.currentTimeMillis()
+        hookMs = startMs
+        confirmed = false
         lastProgressMs = startMs
         offTrack = 0
         minToEnd = Double.MAX_VALUE
