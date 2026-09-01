@@ -565,8 +565,6 @@ class DescentTracker(private val ext: TemplateExtension) {
         if (frac < 0.0) frac = 0.0
         if (frac > 1.0) frac = 1.0
 
-        val ridden = alongMax - joinFrac * polyLen
-
         if (c.komSec > 0.0) {
             val target = c.komSec * (expectedFrac(c.curve, frac) - expectedFrac(c.curve, joinFrac))
             val raw = elapsed - target
@@ -575,22 +573,15 @@ class DescentTracker(private val ext: TemplateExtension) {
             delta = smoothVal
             deltaText = fmtDelta(smoothVal)
             ahead = smoothVal < 0
-            // La media del KOM va riferita al tratto gia' percorso, non all'intero
-            // segmento: su una discesa che parte ripida e finisce in falsopiano la
-            // media totale del recordman e' molto piu' bassa di quella che teneva
-            // qui, e il confronto con la propria faceva sembrare sbagliato il
-            // distacco. Cosi' i due numeri e il distacco dicono la stessa cosa:
-            // media propria sopra quella del KOM <=> distacco a favore.
-            komAvgText = if (target > 1.0 && ridden > 0.0)
-                "%.1f".format(ridden / target * 3.6)
-            else "%.1f".format(komAvgKmh(c))
+            komAvgText = "%.1f".format(komAvgKmh(c))
         } else {
             delta = elapsed
             deltaText = "%.0f".format(elapsed)
             ahead = false
             komAvgText = "--"
         }
-        myAvgText = if (elapsed > 1.0) "%.1f".format(ridden / elapsed * 3.6) else "0.0"
+        myAvgText = if (elapsed > 1.0)
+            "%.1f".format((alongMax - joinFrac * polyLen) / elapsed * 3.6) else "0.0"
         remainingText = fmtKm(polyLen - alongMax)
 
         val toEnd = haversine(lat, lng, c.endLat, c.endLng)
