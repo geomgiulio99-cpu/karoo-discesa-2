@@ -127,7 +127,7 @@ object SegmentSync {
                     }
                 }
 
-                if (isDescent && budget && curve.isBlank() && poly.isNotBlank()) {
+                if (budget && curve.isBlank() && poly.isNotBlank()) {
                     try {
                         val st = JSONObject(
                             apiGet("/segments/$id/streams?keys=distance,altitude&key_by_type=true", token)
@@ -152,8 +152,7 @@ object SegmentSync {
                     nc.put("curve", curve)
                     cache.put(key, nc)
                 }
-                // Il profilo serve solo alle discese: per gli altri non e' un buco.
-                if (kom.isBlank() || (isDescent && curve.isBlank())) missing++
+                if (kom.isBlank() || curve.isBlank()) missing++
 
                 // il segmento entra SEMPRE nella lista
                 val start = seg.getJSONArray("start_latlng")

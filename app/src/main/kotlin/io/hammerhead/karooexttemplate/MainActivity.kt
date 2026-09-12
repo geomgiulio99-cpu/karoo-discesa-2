@@ -56,6 +56,15 @@ class MainActivity : ComponentActivity() {
             textSize = 12f
             setOnClickListener { disarm() }
         }
+        val allBtn = Button(this)
+        allBtn.textSize = 12f
+        allBtn.isAllCaps = false
+        allBtn.text = trackAllLabel()
+        allBtn.setOnClickListener {
+            prefs().edit().putBoolean("trackAll", !trackAllOn()).apply()
+            allBtn.text = trackAllLabel()
+            render()
+        }
         val hint = TextView(this).apply {
             textSize = 13f
             setPadding(0, 20, 0, 6)
@@ -67,6 +76,7 @@ class MainActivity : ComponentActivity() {
         col.addView(output)
         col.addView(simBtn)
         col.addView(disarmBtn)
+        col.addView(allBtn)
         col.addView(hint)
         col.addView(listBox)
 
@@ -102,6 +112,17 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun prefs() = getSharedPreferences("karoo_discesa", MODE_PRIVATE)
+
+    private fun trackAllOn() = prefs().getBoolean("trackAll", false)
+
+    /**
+     * Con l'interruttore acceso l'estensione traccia anche salite e pianeggianti,
+     * ma solo quelli che il live nativo di Hammerhead non gestisce: se il suo
+     * cronometro si accende, il nostro si ritira in silenzio.
+     */
+    private fun trackAllLabel() =
+        if (trackAllOn()) "Salite e pianeggianti: TRACCIATE (se il nativo non le prende)"
+        else "Salite e pianeggianti: SOLO SULLA MAPPA"
 
     private fun startSim() {
         val list = readDescents(applicationContext)

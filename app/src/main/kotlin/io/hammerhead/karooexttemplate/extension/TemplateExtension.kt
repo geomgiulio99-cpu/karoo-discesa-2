@@ -192,6 +192,10 @@ class DescentTracker(private val ext: TemplateExtension) {
         const val JOIN_FRAC = 0.25
         const val APPROACH_RADIUS = 300.0
         const val MAX_JUMP = 80.0
+        /** Quanto si aspetta il live nativo prima di subentrare. */
+        const val NATIVE_WAIT = 8000L
+        /** Senza aggiornamenti per questo tempo, il nativo e' considerato spento. */
+        const val NATIVE_IDLE = 5000L
     }
 
     @Volatile var descents: List<Descent> = emptyList()
@@ -235,16 +239,27 @@ class DescentTracker(private val ext: TemplateExtension) {
     private var minToEnd = Double.MAX_VALUE
     private var confirmed = false
     private var hookMs = 0L
+    /** Traccia anche i segmenti non in discesa, quelli che Hammerhead lascia fuori. */
+    @Volatile var trackAll = false
+    @Volatile private var nativeSeenMs = 0L
+    private var provisional = false
+    private val nativeHandled = HashSet<String>()
     private var locConsumer: String? = null
+    private var segConsumer: String? = null
     private var lapConsumer: String? = null
     private var navConsumer: String? = null
 
     fun reload(context: Context) {
         try {
-            descents = readDescents(context)
+            trackAll = context.getSharedPreferences("karoo_discesa", Context.MODE_PRIVATE)
+                .getBoolean("trackAll", false)
+            descents = if (trackAll) readSegments(context) else readDescents(context)
             polyCache.clear()
         } catch (e: Exception) { }
     }
+
+    /** Il live segment nativo del Karoo sta girando in questo momento. */
+    private fun nativeBusy(now: Long) = now - nativeSeenMs < NATIVE_IDLE
 
     private fun ptsOf(d: Descent): List<DoubleArray> {
         val c = polyCache[d.name]
@@ -295,6 +310,19 @@ class DescentTracker(private val ext: TemplateExtension) {
                 }
             } catch (e: Exception) { null }
         }
+        if (segConsumer == null) {
+            // Unico modo per sapere se Hammerhead sta gestendo lui un segmento:
+            // il suo cronometro nativo emette valori solo mentre si e' dentro uno.
+            segConsumer = try {
+                ext.karooSystem.addConsumer<OnStreamState>(
+                    OnStreamState.StartStreaming(DataType.Type.SEGMENT_TIME)
+                ) { ev: OnStreamState ->
+                    if (ev.state is StreamState.Streaming) {
+                        nativeSeenMs = System.currentTimeMillis()
+                    }
+                }
+            } catch (e: Exception) { null }
+        }
         if (navConsumer == null) {
             navConsumer = try {
                 ext.karooSystem.addConsumer { ev: OnNavigationState ->
@@ -338,6 +366,7 @@ class DescentTracker(private val ext: TemplateExtension) {
     fun stop() {
         locConsumer?.let { try { ext.karooSystem.removeConsumer(it) } catch (e: Exception) { } }
         lapConsumer?.let { try { ext.karooSystem.removeConsumer(it) } catch (e: Exception) { } }
+        segConsumer?.let { try { ext.karooSystem.removeConsumer(it) } catch (e: Exception) { } }
         navConsumer?.let { try { ext.karooSystem.removeConsumer(it) } catch (e: Exception) { } }
         locConsumer = null; lapConsumer = null; navConsumer = null
     }
@@ -436,7 +465,8 @@ class DescentTracker(private val ext: TemplateExtension) {
     private fun checkApproach(list: List<Descent>, lat: Double, lng: Double, now: Long) {
         if (!haveLast) return
         for (d in list) {
-            if (d.lengthM <= 0.0) continue
+            // Sui non-discesa l'avviso di avvicinamento lo da' gia' il nativo.
+            if (d.lengthM <= 0.0 || !d.isDescent) continue
             val dd = haversine(lat, lng, d.lat, d.lng)
             if (dd > APPROACH_RADIUS || dd < 50.0) continue
             if (dd >= haversine(lastLat, lastLng, d.lat, d.lng)) continue
@@ -464,6 +494,7 @@ class DescentTracker(private val ext: TemplateExtension) {
 
         var best = -1.0
         for (d in list) {
+            if (!d.isDescent) continue
             val dd = haversine(lat, lng, d.lat, d.lng)
             if (best < 0 || dd < best) best = dd
         }
@@ -491,6 +522,8 @@ class DescentTracker(private val ext: TemplateExtension) {
                 var bestOff = Double.MAX_VALUE
                 for (d in list) {
                     if (d.lengthM <= 0.0) continue
+                    // Gia' visto gestire dal nativo, o nativo acceso adesso: e' roba sua.
+                    if (!d.isDescent && (nativeBusy(now) || nativeHandled.contains(d.name))) continue
                     val cd = cooldowns[d.name]
                     if (cd != null && now < cd) continue
                     val ds = haversine(lat, lng, d.lat, d.lng)
@@ -519,6 +552,26 @@ class DescentTracker(private val ext: TemplateExtension) {
             }
             lastLat = lat; lastLng = lng; haveLast = true
             return
+        }
+
+        // Cessione al live nativo. Non sappiamo quali 200 segmenti Hammerhead
+        // abbia sincronizzato, ma possiamo accorgercene: se il suo cronometro si
+        // accende, ci ritiriamo in silenzio e ricordiamo quel segmento per non
+        // riprovarci. Le discese non le sincronizza mai, quindi sono sempre nostre.
+        if (!c.isDescent) {
+            if (nativeBusy(now)) {
+                nativeHandled.add(c.name)
+                abortQuiet()
+                return
+            }
+            if (provisional && now - hookMs > NATIVE_WAIT) {
+                // Il nativo non si e' fatto vivo: subentriamo noi, tenendo il
+                // tempo gia' contato dall'aggancio.
+                provisional = false
+                active = true
+                ext.beepStart()
+                ext.markLap()
+            }
         }
 
         var off: Double
@@ -649,7 +702,10 @@ class DescentTracker(private val ext: TemplateExtension) {
         smoothInit = false
         prevLat = lat
         prevLng = lng
-        active = true
+        // Un segmento non in discesa potrebbe essere fra i 200 che gestisce
+        // Hammerhead: si parte muti e invisibili, il tempo intanto corre.
+        provisional = !d.isDescent
+        active = !provisional
         holding = false
         delta = 0.0
         deltaText = "0"
@@ -657,12 +713,16 @@ class DescentTracker(private val ext: TemplateExtension) {
         komAvgText = if (d.komSec > 0) "%.1f".format(komAvgKmh(d)) else "--"
         myAvgText = "0.0"
         remainingText = fmtKm(polyLen - alongMax)
-        ext.beepStart()
-        ext.markLap()
+        if (!provisional) {
+            ext.beepStart()
+            ext.markLap()
+        }
     }
 
     private fun finish(elapsed: Double) {
         val c = cur ?: return
+        // Mai subentrati: il segmento non e' nostro, si chiude senza dire niente.
+        if (provisional) { abortQuiet(); return }
 
         // Il tracciamento si chiude quasi sempre con qualche metro non misurato:
         // la polilinea di Strava e' semplificata, i rilevamenti arrivano a ~1 Hz e
@@ -703,6 +763,21 @@ class DescentTracker(private val ext: TemplateExtension) {
         pts = emptyList()
         active = false
         holding = false
+        provisional = false
+        offTrack = 0
+        minToEnd = Double.MAX_VALUE
+        resetTexts()
+    }
+
+    /** Ritirata muta: nessun beep, nessun giro, il segmento resta al live nativo. */
+    private fun abortQuiet() {
+        val c = cur
+        if (c != null) cooldowns[c.name] = System.currentTimeMillis() + 900000L
+        cur = null
+        pts = emptyList()
+        active = false
+        holding = false
+        provisional = false
         offTrack = 0
         minToEnd = Double.MAX_VALUE
         resetTexts()
