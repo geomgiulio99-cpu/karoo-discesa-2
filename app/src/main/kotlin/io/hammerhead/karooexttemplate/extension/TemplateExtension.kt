@@ -903,6 +903,7 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
         // L'indice delle discese deve restare quello di readDescents(): onPoiChosen
         // ci risale per armare il segmento, quindi si conta a parte.
         var di = -1
+        var si = 0
         for (s in segments) {
             val kmh = komAvgKmh(s)
             val tag = if (kmh > 0) "KOM ${"%.1f".format(kmh)} km/h · " else ""
@@ -920,12 +921,15 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
                         "${tag}FINE ${s.name}")
                 )
             } else {
-                // Non tracciati: il prefisso "seg-" li tiene fuori dall'armamento.
-                val k = symbols.size
+                if (s.poly.isNotEmpty()) {
+                    emitter.onNext(ShowPolyline("segmento-$si", s.poly, 0xFFFF6600.toInt(), 8))
+                }
+                // Il prefisso "seg-" li tiene fuori dall armamento.
                 symbols.add(
-                    Symbol.POI("seg-start-$k", s.lat, s.lng, Symbol.POI.Types.GENERIC,
+                    Symbol.POI("seg-start-$si", s.lat, s.lng, Symbol.POI.Types.GENERIC,
                         "${tag}${s.name}")
                 )
+                si++
             }
         }
         if (symbols.isNotEmpty()) emitter.onNext(ShowSymbols(symbols))
