@@ -252,7 +252,7 @@ class DescentTracker(private val ext: TemplateExtension) {
     fun reload(context: Context) {
         try {
             trackAll = context.getSharedPreferences("karoo_discesa", Context.MODE_PRIVATE)
-                .getBoolean("trackAll", false)
+                .getBoolean("trackAll", true)
             descents = if (trackAll) readSegments(context) else readDescents(context)
             polyCache.clear()
         } catch (e: Exception) { }

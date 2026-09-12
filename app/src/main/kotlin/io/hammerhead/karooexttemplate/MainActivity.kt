@@ -113,7 +113,7 @@ class MainActivity : ComponentActivity() {
 
     private fun prefs() = getSharedPreferences("karoo_discesa", MODE_PRIVATE)
 
-    private fun trackAllOn() = prefs().getBoolean("trackAll", false)
+    private fun trackAllOn() = prefs().getBoolean("trackAll", true)
 
     /**
      * Con l'interruttore acceso l'estensione traccia anche salite e pianeggianti,
