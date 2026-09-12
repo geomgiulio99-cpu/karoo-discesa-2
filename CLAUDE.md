@@ -51,6 +51,11 @@ Dopo ogni push: attendere la build verde, scaricare l'artifact, installare.
 - Armamento manuale di un segmento: dalla mappa con "Vai a" su una bandierina,
   oppure dall'elenco nell'app. Ha la precedenza sulla scelta automatica e si
   consuma appena il segmento viene imboccato.
+- Interruttore **"Salite e pianeggianti"** nell'app (spento di default, chiave
+  `trackAll`). Acceso, l'estensione traccia anche i segmenti non in discesa —
+  quelli che il Karoo lascia fuori dal suo tetto di 200 — cedendo il passo al
+  live nativo dove c'è (vedi sotto). Spento, la lista tracciata torna alle sole
+  discese e tutto il codice della cessione è inerte.
 
 ## Vincoli dell'API Strava (già verificati, non riesplorare)
 
@@ -76,6 +81,35 @@ Dopo ogni push: attendere la build verde, scaricare l'artifact, installare.
 - `MarkLap` è un `data object` senza parametri: il menu lap che il Karoo mostra
   quando si segna un giro **non è sopprimibile**. O si segna il giro accettando
   il menu, o non lo si segna. Scelta presa: si segna solo all'ingresso.
+- **La lista dei segmenti sincronizzati da Hammerhead non è esposta.** Non
+  esiste modo di sapere in anticipo quali segmenti il nativo gestisca. Si scopre
+  però in tempo reale: il tipo di dato `SEGMENT_TIME` emette valori solo mentre
+  si è dentro un live segment nativo, quindi un consumer su quello fa da
+  rilevatore. **Da verificare sul campo:** esiste un campo
+  `SEGMENT_OFF_TIME_REMAINING` che fa sospettare che lo stream continui anche
+  dopo l'uscita dal segmento; se fosse così la cessione sarebbe troppo generosa
+  e `NATIVE_IDLE` andrebbe stretto.
+
+## Il tetto dei 200 e la cessione al nativo
+
+Il Karoo sincronizza **al massimo 200 segmenti Strava** (documentazione
+Hammerhead ufficiale), e non sincronizza mai le discese. Oltre quella soglia il
+live nativo semplicemente non esiste. La nostra estensione non ha alcun tetto:
+scarica tutti i preferiti, quindi può coprire gli esclusi.
+
+Il meccanismo di cessione riguarda **solo i segmenti non in discesa**, perché le
+discese sono sempre nostre:
+
+1. All'aggancio si parte **provvisori** (`provisional`): il cronometro corre, ma
+   niente beep, niente giro, campo dati spento.
+2. Se entro `NATIVE_WAIT` il cronometro nativo si accende, ritirata muta
+   (`abortQuiet`) e il segmento finisce in `nativeHandled`, per non riprovarci.
+3. Se non si fa vivo, si subentra: beep, giro e display, **tenendo il tempo già
+   contato dall'aggancio** — i primi secondi non si perdono.
+4. Se il nativo parte in ritardo, a subentro avvenuto, ci si ritira comunque.
+
+L'avviso di avvicinamento e il campo "Discesa vicina" restano sulle sole
+discese: sui non-discesa il preavviso lo dà già il nativo.
 - I valori dei tipi di dato di sistema vanno letti con `dataPoint.singleValue`:
   il nome del campo cambia da tipo a tipo (per la media giro è `AVERAGE_SPEED`,
   non `SINGLE`).
