@@ -830,7 +830,18 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
                 val n = SegmentSync.sync(applicationContext, 30 * 60 * 1000L) { }
                 if (n >= 0) {
                     tracker.reload(applicationContext)
-                    notifyUser("Discese KOM", "$n segmenti preferiti pronti")
+                    // La schermata dell app su alcuni Karoo non e' raggiungibile:
+                    // lo stato della sincronizzazione va detto qui, nella notifica.
+                    val all = readSegments(applicationContext)
+                    val nDesc = all.count { it.isDescent }
+                    val noPoly = all.count { it.poly.isEmpty() }
+                    val noKom = all.count { it.komSec <= 0.0 }
+                    notifyUser(
+                        "Discese KOM",
+                        "$n pronti · $nDesc discese · " +
+                            (if (noPoly > 0) "$noPoly SENZA TRACCIA" else "tutti con traccia") +
+                            (if (noKom > 0) " · $noKom senza KOM" else "")
+                    )
                     return@Thread
                 }
                 if (n == SegmentSync.SKIPPED) return@Thread
