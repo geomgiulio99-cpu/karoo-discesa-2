@@ -824,19 +824,26 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
 
     private fun syncAtBoot() {
         Thread {
+            // All'avvio una notifica arriva SEMPRE, anche quando la
+            // sincronizzazione viene saltata perche' gia' fatta di recente:
+            // restare muti era l'unico segno di vita dell'estensione e faceva
+            // sembrare che non funzionasse piu' niente.
             var attempt = 0
             while (attempt < 5) {
                 attempt++
                 val n = SegmentSync.sync(applicationContext, 30 * 60 * 1000L) { }
                 if (n >= 0) {
                     tracker.reload(applicationContext)
-                    reportState(n)
+                    reportState()
                     return@Thread
                 }
-                if (n == SegmentSync.SKIPPED) return@Thread
+                if (n == SegmentSync.SKIPPED) {
+                    reportState()
+                    return@Thread
+                }
                 try { Thread.sleep(180000) } catch (e: Exception) { return@Thread }
             }
-            notifyUser("Discese KOM", "Sincronizzazione non riuscita: apri l'app con la rete attiva")
+            notifyUser("Discese KOM", "Sincronizzazione non riuscita: serve la rete")
         }.start()
     }
 
@@ -845,14 +852,14 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
      * schermata dell'app non e' raggiungibile dalla libreria Extensions, quindi
      * i contatori devono arrivare per questa via.
      */
-    private fun reportState(n: Int) {
+    private fun reportState() {
         val all = readSegments(applicationContext)
         val nDesc = all.count { it.isDescent }
         val noPoly = all.count { it.poly.isEmpty() }
         val noKom = all.count { it.komSec <= 0.0 }
         notifyUser(
             "Discese KOM",
-            "$n pronti, $nDesc discese, " +
+            "${all.size} pronti, $nDesc discese, " +
                 (if (noPoly > 0) "$noPoly SENZA TRACCIA" else "tutti con traccia") +
                 (if (noKom > 0) ", $noKom senza KOM" else "")
         )
@@ -865,7 +872,7 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
             notifyUser("Discese KOM", "Sincronizzazione in corso...")
             val n = SegmentSync.sync(applicationContext, 0L) { }
             when {
-                n >= 0 -> { tracker.reload(applicationContext); reportState(n) }
+                n >= 0 -> { tracker.reload(applicationContext); reportState() }
                 n == SegmentSync.SKIPPED ->
                     notifyUser("Discese KOM", "Sincronizzazione gia' in corso")
                 else ->
