@@ -17,6 +17,15 @@ object SegmentSync {
     const val SKIPPED = -2
     const val FAILED = -1
 
+    /** Errore HTTP con il codice, per distinguere il limite di richieste dal resto. */
+    class HttpError(val code: Int) : RuntimeException("HTTP " + code)
+
+    /** 429 e' il limite di richieste Strava: inutile insistere, si riprende dopo. */
+    private fun isRateLimit(e: Exception) = e is HttpError && e.code == 429
+
+    /** 4xx diverso da 429: quel segmento non e' leggibile, ma gli altri si'. */
+    private fun isSegmentFault(e: Exception) = e is HttpError && e.code in 400..499
+
     @Volatile private var running = false
 
     fun lastSyncMs(context: Context): Long =
@@ -106,7 +115,12 @@ object SegmentSync {
                 // 2) da quel che avevamo già salvato
                 val pv = prev[key]
                 if (pv != null) {
-                    if (kom.isBlank()) kom = pv.optString("kom", "")
+                    // "n/d" e' il segnaposto scritto nella lista salvata: se rientrasse
+                    // qui verrebbe scambiato per un KOM valido e non si riproverebbe mai.
+                    if (kom.isBlank()) {
+                        val k = pv.optString("kom", "")
+                        if (k != "n/d") kom = k
+                    }
                     if (poly.isBlank()) poly = pv.optString("poly", "")
                     if (curve.isBlank()) curve = pv.optString("curve", "")
                 }
@@ -128,8 +142,15 @@ object SegmentSync {
                         fetched++
                         Thread.sleep(250)
                     } catch (e: Exception) {
-                        errors++
-                        if (errors >= 3) budget = false
+                        // Prima bastavano tre errori qualsiasi per spegnere budget e
+                        // saltare TUTTI i segmenti successivi: tre segmenti guasti
+                        // lasciavano senza traccia tutta la coda della lista, a ogni
+                        // sincronizzazione. Ora solo il limite di richieste ferma.
+                        if (isRateLimit(e)) budget = false
+                        else if (!isSegmentFault(e)) {
+                            errors++
+                            if (errors >= 8) budget = false
+                        }
                     }
                 }
 
@@ -145,8 +166,11 @@ object SegmentSync {
                         fetched++
                         Thread.sleep(250)
                     } catch (e: Exception) {
-                        errors++
-                        if (errors >= 3) budget = false
+                        if (isRateLimit(e)) budget = false
+                        else if (!isSegmentFault(e)) {
+                            errors++
+                            if (errors >= 8) budget = false
+                        }
                     }
                 }
 
@@ -288,7 +312,7 @@ object SegmentSync {
         val code = conn.responseCode
         val stream = if (code in 200..299) conn.inputStream else conn.errorStream
         val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
-        if (code !in 200..299) throw RuntimeException("HTTP $code")
+        if (code !in 200..299) throw HttpError(code)
         return text
     }
 }
