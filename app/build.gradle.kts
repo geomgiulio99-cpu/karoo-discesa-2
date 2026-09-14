@@ -8,6 +8,19 @@ android {
     namespace = "io.hammerhead.karooexttemplate"
     compileSdk = 34
 
+    // Senza un keystore esplicito ogni build di CI ne genera uno nuovo: la firma
+    // dell APK cambia a ogni esecuzione e il Karoo rifiuta l aggiornamento,
+    // costringendo a disinstallare e a perdere tutti i segmenti sincronizzati.
+    // Questo e un keystore di debug, non serve a proteggere niente.
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     defaultConfig {
         applicationId = "io.hammerhead.karooexttemplate"
         minSdk = 23
