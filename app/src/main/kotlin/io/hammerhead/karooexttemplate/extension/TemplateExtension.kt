@@ -830,24 +830,47 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
                 val n = SegmentSync.sync(applicationContext, 30 * 60 * 1000L) { }
                 if (n >= 0) {
                     tracker.reload(applicationContext)
-                    // La schermata dell app su alcuni Karoo non e' raggiungibile:
-                    // lo stato della sincronizzazione va detto qui, nella notifica.
-                    val all = readSegments(applicationContext)
-                    val nDesc = all.count { it.isDescent }
-                    val noPoly = all.count { it.poly.isEmpty() }
-                    val noKom = all.count { it.komSec <= 0.0 }
-                    notifyUser(
-                        "Discese KOM",
-                        "$n pronti · $nDesc discese · " +
-                            (if (noPoly > 0) "$noPoly SENZA TRACCIA" else "tutti con traccia") +
-                            (if (noKom > 0) " · $noKom senza KOM" else "")
-                    )
+                    reportState(n)
                     return@Thread
                 }
                 if (n == SegmentSync.SKIPPED) return@Thread
                 try { Thread.sleep(180000) } catch (e: Exception) { return@Thread }
             }
             notifyUser("Discese KOM", "Sincronizzazione non riuscita: apri l'app con la rete attiva")
+        }.start()
+    }
+
+    /**
+     * Stato della sincronizzazione detto nella notifica: su alcuni Karoo la
+     * schermata dell'app non e' raggiungibile dalla libreria Extensions, quindi
+     * i contatori devono arrivare per questa via.
+     */
+    private fun reportState(n: Int) {
+        val all = readSegments(applicationContext)
+        val nDesc = all.count { it.isDescent }
+        val noPoly = all.count { it.poly.isEmpty() }
+        val noKom = all.count { it.komSec <= 0.0 }
+        notifyUser(
+            "Discese KOM",
+            "$n pronti, $nDesc discese, " +
+                (if (noPoly > 0) "$noPoly SENZA TRACCIA" else "tutti con traccia") +
+                (if (noKom > 0) ", $noKom senza KOM" else "")
+        )
+    }
+
+    /** Azione "Sincronizza segmenti" richiamabile dal Karoo, senza aprire l'app. */
+    override fun onBonusAction(actionId: String) {
+        if (actionId != "sync-now") return
+        Thread {
+            notifyUser("Discese KOM", "Sincronizzazione in corso...")
+            val n = SegmentSync.sync(applicationContext, 0L) { }
+            when {
+                n >= 0 -> { tracker.reload(applicationContext); reportState(n) }
+                n == SegmentSync.SKIPPED ->
+                    notifyUser("Discese KOM", "Sincronizzazione gia' in corso")
+                else ->
+                    notifyUser("Discese KOM", "Sincronizzazione non riuscita: serve la rete")
+            }
         }.start()
     }
 

@@ -5,6 +5,9 @@
     id="template-id"
     scansDevices="false"
     mapLayer="true">
+    <BonusAction
+        actionId="sync-now"
+        displayName="@string/action_sync" />
     <DataType
         typeId="descent-distance"
         displayName="@string/dt_descent_name"
