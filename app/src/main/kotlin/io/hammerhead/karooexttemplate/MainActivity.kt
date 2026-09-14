@@ -96,6 +96,7 @@ class MainActivity : ComponentActivity() {
                 else -> {
                     val all = readSegments(applicationContext)
                     val desc = all.filter { it.isDescent }
+                    val noPoly = all.count { it.poly.isEmpty() }
                     var noKom = 0
                     var withCurve = 0
                     for (d in desc) {
@@ -104,7 +105,9 @@ class MainActivity : ComponentActivity() {
                     }
                     "Pronto: ${desc.size} discese tracciate\n" +
                         "$withCurve con profilo · $noKom senza KOM\n" +
-                        "${all.size - desc.size} altri preferiti sulla mappa"
+                        "${all.size - desc.size} altri preferiti sulla mappa\n" +
+                        (if (noPoly > 0) "$noPoly senza traccia: riapri per completare"
+                         else "tutti con traccia sulla mappa")
                 }
             }
             runOnUiThread { render() }

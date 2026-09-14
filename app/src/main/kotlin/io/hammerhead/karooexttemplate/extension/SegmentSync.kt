@@ -117,7 +117,13 @@ object SegmentSync {
                         val detail = JSONObject(apiGet("/segments/$id", token))
                         val k = detail.optJSONObject("xoms")?.optString("kom") ?: ""
                         if (k.isNotBlank()) kom = k
-                        val p = detail.optJSONObject("map")?.optString("polyline") ?: ""
+                        // Su parecchi segmenti Strava lascia vuoto "polyline" e
+                        // popola solo "summary_polyline". Prendendo solo il primo
+                        // si salvava la traccia vuota per sempre: sulla mappa
+                        // comparivano le bandierine ma non la linea.
+                        val m = detail.optJSONObject("map")
+                        var p = m?.optString("polyline") ?: ""
+                        if (p.isBlank()) p = m?.optString("summary_polyline") ?: ""
                         if (p.isNotBlank()) poly = p
                         fetched++
                         Thread.sleep(250)
@@ -152,7 +158,7 @@ object SegmentSync {
                     nc.put("curve", curve)
                     cache.put(key, nc)
                 }
-                if (kom.isBlank() || curve.isBlank()) missing++
+                if (kom.isBlank() || poly.isBlank() || curve.isBlank()) missing++
 
                 // il segmento entra SEMPRE nella lista
                 val start = seg.getJSONArray("start_latlng")
