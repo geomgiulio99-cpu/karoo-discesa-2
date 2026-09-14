@@ -900,6 +900,7 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
     override fun startMap(emitter: Emitter<MapEffect>) {
         val segments = readSegments(applicationContext)
         val symbols = ArrayList<Symbol>()
+        val lines = ArrayList<ShowPolyline>()
         // L'indice delle discese deve restare quello di readDescents(): onPoiChosen
         // ci risale per armare il segmento, quindi si conta a parte.
         var di = -1
@@ -910,7 +911,7 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
             if (s.isDescent) {
                 di++
                 if (s.poly.isNotEmpty()) {
-                    emitter.onNext(ShowPolyline("discesa-$di", s.poly, 0xFFFF6600.toInt(), 8))
+                    lines.add(ShowPolyline("discesa-$di", s.poly, 0xFFFF6600.toInt(), 8))
                 }
                 symbols.add(
                     Symbol.POI("disc-start-$di", s.lat, s.lng, Symbol.POI.Types.SUMMIT,
@@ -922,7 +923,7 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
                 )
             } else {
                 if (s.poly.isNotEmpty()) {
-                    emitter.onNext(ShowPolyline("segmento-$si", s.poly, 0xFFFF6600.toInt(), 8))
+                    lines.add(ShowPolyline("segmento-$si", s.poly, 0xFFFF6600.toInt(), 8))
                 }
                 // Il prefisso "seg-" li tiene fuori dall armamento.
                 symbols.add(
@@ -932,7 +933,22 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
                 si++
             }
         }
+        // Le bandierine partono subito: viaggiano tutte in un messaggio solo.
         if (symbols.isNotEmpty()) emitter.onNext(ShowSymbols(symbols))
+
+        // Le tracce invece sono un messaggio ciascuna. Sparandone oltre duecento
+        // di fila se ne perdevano quasi tutte: restavano le bandierine e nessuna
+        // linea. Vengono mandate a raffica lenta, da un thread a parte, cosi' la
+        // mappa fa in tempo a digerirle.
+        var run = true
+        Thread {
+            for (l in lines) {
+                if (!run) return@Thread
+                try { emitter.onNext(l) } catch (e: Exception) { return@Thread }
+                try { Thread.sleep(60) } catch (e: Exception) { return@Thread }
+            }
+        }.start()
+        emitter.setCancellable { run = false }
     }
 
     override fun onDestroy() {
