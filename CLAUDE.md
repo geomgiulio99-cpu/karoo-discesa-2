@@ -16,6 +16,21 @@ artifact `karoo-app-debug` e si installa sul Karoo tramite l'app
 
 Dopo ogni push: attendere la build verde, scaricare l'artifact, installare.
 
+**Il keystore di debug sta nel repository** (`app/debug.keystore`, credenziali
+standard `android`/`androiddebugkey`) ed è usato da `signingConfigs.debug`.
+Senza, Gradle ne genererebbe uno nuovo a ogni build di CI: la firma cambierebbe
+ogni volta, il Karoo rifiuterebbe l'aggiornamento con
+`INSTALL_FAILED_UPDATE_INCOMPATIBLE` e l'unica via sarebbe disinstallare,
+perdendo tutti i segmenti già sincronizzati. Non toccarlo.
+
+Per diagnosticare sul dispositivo si usa **adb** (Impostazioni → About → Build
+Number sette volte → Developer Options → USB Debugging). L'APK è `debuggable`,
+quindi `run-as io.hammerhead.karooexttemplate` legge i dati salvati in
+`shared_prefs/karoo_discesa.xml`, e `am start -n
+io.hammerhead.karooexttemplate/.MainActivity` apre l'app anche quando la sua
+icona non compare nella libreria Extensions. Nel logcat le tracce consegnate
+alla mappa si vedono con `PolylineManager addPolyline()`.
+
 ## Struttura
 
     app/src/main/kotlin/io/hammerhead/karooexttemplate/
