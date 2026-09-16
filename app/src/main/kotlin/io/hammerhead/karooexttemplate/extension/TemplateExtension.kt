@@ -668,8 +668,17 @@ class DescentTracker(private val ext: TemplateExtension) {
             ahead = false
             komAvgText = "--"
         }
-        myAvgText = if (elapsed > 1.0)
-            "%.1f".format((alongMax - joinFrac * polyLen) / elapsed * 3.6) else "0.0"
+        // La propria media arriva dalla media del giro del Karoo: il giro viene
+        // segnato all'ingresso nel segmento, quindi copre esattamente il tratto
+        // percorso. Calcolarla come distanza diviso tempo dava un dente di sega,
+        // perche' alongMax avanza a scatti a ogni rilevamento GPS mentre elapsed
+        // scorre liscio, e il campo si ridisegna due volte al secondo.
+        // Nei primi secondi il giro puo' non essersi ancora azzerato: li' si usa
+        // ancora il calcolo diretto.
+        myAvgText = if (elapsed > 4.0 && lapAvgKmh >= 0.0) "%.1f".format(lapAvgKmh)
+        else if (elapsed > 1.0)
+            "%.1f".format((alongMax - joinFrac * polyLen) / elapsed * 3.6)
+        else "0.0"
         remainingText = fmtKm(polyLen - alongMax)
 
         val toEnd = haversine(lat, lng, c.endLat, c.endLng)
