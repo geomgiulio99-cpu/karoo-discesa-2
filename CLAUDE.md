@@ -100,10 +100,10 @@ alla mappa si vedono con `PolylineManager addPolyline()`.
   esiste modo di sapere in anticipo quali segmenti il nativo gestisca. Si scopre
   però in tempo reale: il tipo di dato `SEGMENT_TIME` emette valori solo mentre
   si è dentro un live segment nativo, quindi un consumer su quello fa da
-  rilevatore. **Da verificare sul campo:** esiste un campo
-  `SEGMENT_OFF_TIME_REMAINING` che fa sospettare che lo stream continui anche
-  dopo l'uscita dal segmento; se fosse così la cessione sarebbe troppo generosa
-  e `NATIVE_IDLE` andrebbe stretto.
+  rilevatore. **Verificato su strada** il 15 settembre 2026: la cessione al
+  nativo e il subentro sui segmenti oltre i 200 funzionano, con `NATIVE_WAIT`
+  a 8 s e `NATIVE_IDLE` a 5 s. Il sospetto che `SEGMENT_OFF_TIME_REMAINING`
+  tenesse lo stream acceso anche fuori dal segmento si è rivelato infondato.
 
 ## Il tetto dei 200 e la cessione al nativo
 
