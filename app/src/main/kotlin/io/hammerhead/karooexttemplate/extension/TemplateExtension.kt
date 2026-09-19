@@ -303,8 +303,16 @@ class DescentTracker(private val ext: TemplateExtension) {
                 ) { ev: OnStreamState ->
                     val st = ev.state
                     if (st is StreamState.Streaming) {
-                        val v = st.dataPoint.singleValue
-                        if (v != null && v >= 0.0) {
+                        // Il campo si legge per nome: singleValue prende il primo
+                        // della mappa, che con piu' di un campo non e' garantito
+                        // essere quello giusto.
+                        val dp = st.dataPoint
+                        val v = dp.values[DataType.Field.AVERAGE_SPEED] ?: dp.singleValue
+                        // Uno zero non cancella una media buona: il flusso ogni
+                        // tanto ne manda uno e il campo crollava a zero per poi
+                        // tornare normale. La media viene azzerata solo da noi,
+                        // quando segniamo il giro all'ingresso nel segmento.
+                        if (v != null && v > 0.0) {
                             // Prima c'era "if (v < 30.0) v * 3.6 else v", un
                             // indovinello sull'unita'. Se il flusso e' in km/h,
                             // ogni volta che la media attraversava i 30 il valore
@@ -924,6 +932,9 @@ class TemplateExtension : KarooExtension("template-id", "1.0") {
     }
 
     fun markLap() {
+        // Il giro riparte da zero: la vecchia media non vale piu' e il campo
+        // ripiega sul calcolo diretto finche' il Karoo non manda la nuova.
+        tracker.lapAvgKmh = -1.0
         try { karooSystem.dispatch(MarkLap) } catch (e: Exception) { }
     }
 
