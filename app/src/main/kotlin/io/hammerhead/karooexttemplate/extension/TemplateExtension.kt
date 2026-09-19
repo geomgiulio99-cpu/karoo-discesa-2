@@ -242,6 +242,7 @@ class DescentTracker(private val ext: TemplateExtension) {
     /** Traccia anche i segmenti non in discesa, quelli che Hammerhead lascia fuori. */
     @Volatile var trackAll = false
     @Volatile private var nativeSeenMs = 0L
+    @Volatile private var lastLapLogMs = 0L
     private var provisional = false
     private val nativeHandled = HashSet<String>()
     private var locConsumer: String? = null
@@ -304,7 +305,22 @@ class DescentTracker(private val ext: TemplateExtension) {
                     if (st is StreamState.Streaming) {
                         val v = st.dataPoint.singleValue
                         if (v != null && v >= 0.0) {
-                            lapAvgKmh = if (v < 30.0) v * 3.6 else v
+                            // Prima c'era "if (v < 30.0) v * 3.6 else v", un
+                            // indovinello sull'unita'. Se il flusso e' in km/h,
+                            // ogni volta che la media attraversava i 30 il valore
+                            // saltava fra 30 e 108: instabile sui segmenti lenti,
+                            // apparentemente sano sulle discese veloci che restano
+                            // sopra soglia. I tipi di dato del Karoo sono in unita'
+                            // SI, quindi m/s, come nel file FIT.
+                            lapAvgKmh = v * 3.6
+                            val now = System.currentTimeMillis()
+                            if (now - lastLapLogMs > 10000L) {
+                                lastLapLogMs = now
+                                android.util.Log.i(
+                                    "DisceseKOM",
+                                    "media giro grezza=" + v + " -> " + lapAvgKmh + " km/h"
+                                )
+                            }
                         }
                     }
                 }
@@ -675,7 +691,11 @@ class DescentTracker(private val ext: TemplateExtension) {
         // scorre liscio, e il campo si ridisegna due volte al secondo.
         // Nei primi secondi il giro puo' non essersi ancora azzerato: li' si usa
         // ancora il calcolo diretto.
-        myAvgText = if (elapsed > 4.0 && lapAvgKmh >= 0.0) "%.1f".format(lapAvgKmh)
+        // Dentro al segmento si mostra la stessa media del giro che si legge
+        // fuori: il giro viene segnato all'ingresso, quindi copre esattamente il
+        // tratto percorso, ed e' gia' lisciata dal Karoo. Il calcolo diretto resta
+        // solo come ripiego se quel flusso non e' ancora arrivato.
+        myAvgText = if (lapAvgKmh >= 0.0) "%.1f".format(lapAvgKmh)
         else if (elapsed > 1.0)
             "%.1f".format((alongMax - joinFrac * polyLen) / elapsed * 3.6)
         else "0.0"
